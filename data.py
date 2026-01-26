@@ -12,8 +12,10 @@ class StrokeDataset(Dataset):
     def __len__(self):
         return self.length
 
-    def get_bezier_point(self, t, p0, p1, p2, p3):
+    def get_bezier_point(self, t, points):
         # 三次贝塞尔曲线公式 B(t)
+        # points: [p0, p1, p2, p3], 每个 p 是 2D 点
+        p0, p1, p2, p3 = points
         return (
             (1 - t) ** 3 * p0
             + 3 * (1 - t) ** 2 * t * p1
@@ -42,7 +44,7 @@ class StrokeDataset(Dataset):
             t = i / (num_steps - 1)
 
             # 计算当前坐标
-            pt = self.get_bezier_point(t, *points) * scale
+            pt = self.get_bezier_point(t, points) * scale
 
             # 计算当前宽度 (简单的线性插值，你可以改为非线性)
             current_width = w_start + (w_end - w_start) * t
