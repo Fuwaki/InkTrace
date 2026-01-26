@@ -1,0 +1,16 @@
+# Intel XPU PyTorch 训练环境依赖
+# Python 3.10+
+
+# PyTorch with XPU支持
+torch==2.7.0+xpu
+torchvision==0.22.0+xpu
+
+# Intel扩展和运行时
+intel_extension_for_pytorch==2.7.0
+dpctl==0.21.1
+
+# 通用依赖
+numpy
+pillow
+matplotlib
+tqdm
