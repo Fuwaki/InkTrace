@@ -119,6 +119,15 @@ def parse_args():
         help="训练阶段: 1, 1.5, 1.6, 1.7",
     )
 
+    # 预设配置
+    parser.add_argument(
+        "--profile",
+        type=str,
+        choices=["default", "rtx3060", "rtx5090", "tpu"],
+        default="default",
+        help="硬件配置预设 (default: CPU/轻量级, rtx5090: 极致性能)",
+    )
+
     # 检查点参数 (互斥组)
     checkpoint_group = parser.add_mutually_exclusive_group(required=True)
     checkpoint_group.add_argument(
@@ -461,6 +470,26 @@ def visualize_reconstruction(model, dataset, device, save_path, num_samples=6):
 
 def train(args):
     """主训练函数"""
+    # 0. 应用 Profile 预设
+    if args.profile == "rtx5090":
+        print("\n🚀 应用 RTX 5090 极致性能配置")
+        # 极大的 Batch Size 和 数据量，充分利用显存和算力
+        if args.batch_size is None:
+            args.batch_size = 1024
+        if args.dataset_size == 20000:
+            args.dataset_size = 300000  # 增加到 30万
+        # 自动增加一点 epochs 以确保在海量数据下充分收敛
+        if args.epochs is None:
+            # 基础 epochs * 1.5
+            args.epochs = int(PHASE_CONFIGS[args.phase]["default_epochs"] * 1.5)
+
+    elif args.profile == "rtx3060":
+        print("\n🚀 应用 RTX 3060 性能配置")
+        if args.batch_size is None:
+            args.batch_size = 256
+        if args.dataset_size == 20000:
+            args.dataset_size = 100000
+
     # 获取阶段配置
     phase_config = PHASE_CONFIGS[args.phase]
     print("\n" + "=" * 60)
