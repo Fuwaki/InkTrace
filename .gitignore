@@ -1,6 +1,32 @@
-.venv
-data
-mnist_data
+# 虚拟环境
+.venv/
+env/
+venv/
+
+# 数据与模型
+data/
+mnist_data/
+*.pth
+checkpoints/
+
+# 训练结果与日志
+results/
+runs/
 *.png
-target
-*.pyc
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Jupyter Notebook 缓存
+.ipynb_checkpoints/
+
+# Rust 构建产物
+target/
+
+# 编辑器配置 (可选)
+.vscode/
+.idea/
+.DS_Store
