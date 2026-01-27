@@ -16,7 +16,11 @@ from datasets import IndependentStrokesDataset
 
 def draw_bezier_strokes(ax, strokes, validity, threshold=0.5, color='red'):
     """绘制贝塞尔笔画"""
-    valid_mask = validity.squeeze(-1) > threshold
+    # 处理可能是1D或2D的validity数组
+    if validity.ndim == 2:
+        valid_mask = validity.squeeze(-1) > threshold
+    else:
+        valid_mask = validity > threshold
 
     if not valid_mask.any():
         return
@@ -70,6 +74,10 @@ def visualize_detr_predictions(model, dataset, device, num_samples=6):
             gt_strokes = target[..., :10].numpy()
             gt_validity = target[..., 10:11].numpy()
 
+            # 转换为 numpy（在 no_grad 中）
+            pred_strokes_np = strokes.cpu().squeeze(0).numpy()
+            pred_validity_np = validity.cpu().squeeze(0).squeeze(-1).numpy()
+
             # 显示原图 + GT
             axes[0, i].imshow(img, cmap='gray', vmin=0, vmax=255)
             draw_bezier_strokes(axes[0, i], gt_strokes, gt_validity,
@@ -80,8 +88,6 @@ def visualize_detr_predictions(model, dataset, device, num_samples=6):
 
             # 显示原图 + 预测
             axes[1, i].imshow(img, cmap='gray', vmin=0, vmax=255, alpha=0.5)
-            pred_strokes_np = strokes.cpu().squeeze(0).numpy()
-            pred_validity_np = validity.cpu().squeeze(0).unsqueeze(-1).numpy()
             draw_bezier_strokes(axes[1, i], pred_strokes_np, pred_validity_np,
                               threshold=0.5, color='red')
             num_pred = (pred_validity_np > 0.5).sum()
@@ -113,13 +119,13 @@ def compute_metrics(model, dataset, device, num_samples=100):
             strokes, validity, _ = model(img_batch, mode='vectorize')
 
             pred_strokes = strokes.cpu().squeeze(0)
-            pred_validity = validity.cpu().squeeze(0)
+            pred_validity = validity.cpu().squeeze(0).squeeze(-1)  # 修正 shape
 
             gt_strokes = target[..., :10]
             gt_validity = target[..., 10:11]
 
             valid_gt_mask = gt_validity.squeeze(-1) > 0.5
-            valid_pred_mask = pred_validity.squeeze(-1) > 0.5
+            valid_pred_mask = pred_validity > 0.5
 
             num_gt = valid_gt_mask.sum().item()
             num_pred = valid_pred_mask.sum().item()
@@ -172,17 +178,22 @@ def test_single_sample(model, dataset, device, index=0):
 
     img_batch = img_tensor.unsqueeze(0).to(device)
 
-    # 使用统一的接口预测
-    strokes, validity, _ = model(img_batch, mode='vectorize')
+    # 使用统一的接口预测（在 torch.no_grad() 中）
+    with torch.no_grad():
+        strokes, validity, _ = model(img_batch, mode='vectorize')
 
-    gt_strokes = target[..., :10].numpy()
-    gt_validity = target[..., 10:11].numpy()
+        gt_strokes = target[..., :10].numpy()
+        gt_validity = target[..., 10:11].numpy()
 
-    num_gt = (gt_validity > 0.5).sum()
-    num_pred = (validity > 0.5).sum().item()
+        num_gt = (gt_validity > 0.5).sum()
+        num_pred = (validity > 0.5).sum().item()
 
-    print(f"  GT 笔画数: {num_gt}")
-    print(f"  预测笔画数: {num_pred}")
+        print(f"  GT 笔画数: {num_gt}")
+        print(f"  预测笔画数: {num_pred}")
+
+        # 转换为 numpy（在 no_grad 中）
+        pred_strokes_np = strokes.cpu().squeeze(0).numpy()
+        pred_validity_np = validity.cpu().squeeze(0).squeeze(-1).numpy()  # 移除最后的一维
 
     # 可视化
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -198,8 +209,6 @@ def test_single_sample(model, dataset, device, index=0):
     axes[1].axis('off')
 
     axes[2].imshow(img, cmap='gray', vmin=0, vmax=255, alpha=0.5)
-    pred_strokes_np = strokes.cpu().squeeze(0).numpy()
-    pred_validity_np = validity.cpu().squeeze(0).unsqueeze(-1).numpy()
     draw_bezier_strokes(axes[2], pred_strokes_np, pred_validity_np,
                       threshold=0.5, color='red')
     axes[2].set_title(f'Prediction ({num_pred} strokes)')
@@ -212,7 +221,7 @@ def test_single_sample(model, dataset, device, index=0):
 
 
 def main():
-    device = 'xpu'
+    device = 'cpu'
     print(f"使用设备: {device}")
 
     # 使用统一的工厂类加载模型
