@@ -269,7 +269,9 @@ def create_model(embed_dim, num_heads, num_layers, device):
     return model
 
 
-def load_checkpoint(model, checkpoint_path, device, load_optimizer=False, optimizer=None):
+def load_checkpoint(
+    model, checkpoint_path, device, load_optimizer=False, optimizer=None
+):
     """
     加载检查点
 
@@ -296,7 +298,11 @@ def load_checkpoint(model, checkpoint_path, device, load_optimizer=False, optimi
         print(f"  ✓ 加载 Pixel Decoder 权重")
 
     # 加载优化器状态 (可选)
-    if load_optimizer and optimizer is not None and "optimizer_state_dict" in checkpoint:
+    if (
+        load_optimizer
+        and optimizer is not None
+        and "optimizer_state_dict" in checkpoint
+    ):
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         print(f"  ✓ 加载优化器状态")
 
@@ -350,7 +356,9 @@ def create_dataset(phase_config, dataset_size, batch_size, num_workers):
     return dataset, dataloader
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, epoch, log_interval, writer=None):
+def train_epoch(
+    model, dataloader, criterion, optimizer, device, epoch, log_interval, writer=None
+):
     """训练一个 epoch"""
     model.train()
     epoch_loss = 0.0
@@ -509,8 +517,14 @@ def train(args):
     for epoch in range(1, epochs + 1):
         # 训练一个 epoch
         avg_loss = train_epoch(
-            model, dataloader, criterion, optimizer, device,
-            epoch, args.log_interval, writer
+            model,
+            dataloader,
+            criterion,
+            optimizer,
+            device,
+            epoch,
+            args.log_interval,
+            writer,
         )
 
         # 更新学习率
