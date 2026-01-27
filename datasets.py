@@ -1,316 +1,263 @@
-"""
-数据集模块
-
-包含所有数据集类：
-- StrokeDataset: 单笔画数据集
-- MultiStrokeReconstructionDataset: 连续多笔画重建数据集（Phase 1.5）
-- IndependentStrokesDataset: 独立多笔画数据集（Phase 1.6, Phase 2）
-"""
-
-import numpy as np
 import torch
-from torch.utils.data import Dataset
-import cv2
+from torch.utils.data import IterableDataset, DataLoader
+import numpy as np
+import ink_trace_rs
+import math
 
 
-class StrokeDataset(Dataset):
+class InkTraceDataset(IterableDataset):
     """
-    单笔画数据集（Phase 1 使用）
+    基于 Rust 高性能生成后端的无限数据集。
 
-    生成单条贝塞尔曲线的笔画
-    """
-
-    def __init__(self, size=64, length=10000):
-        self.size = size
-        self.length = length
-
-    def __len__(self):
-        return self.length
-
-    def get_bezier_point(self, t, points):
-        # 三次贝塞尔曲线公式 B(t)
-        p0, p1, p2, p3 = points
-        return (
-            (1 - t) ** 3 * p0
-            + 3 * (1 - t) ** 2 * t * p1
-            + 3 * (1 - t) * t**2 * p2
-            + t**3 * p3
-        )
-
-    def render_stroke(self):
-        # 1. 随机生成控制点
-        points = np.random.rand(4, 2) * (self.size * 1.5) - (self.size * 0.25)
-
-        # 2. 随机生成宽度
-        w_start = np.random.uniform(1.0, 6.0)
-        w_end = np.random.uniform(1.0, 6.0)
-
-        # 创建画布（2倍超采样）
-        scale = 2
-        canvas_size = self.size * scale
-        img = np.zeros((canvas_size, canvas_size), dtype=np.uint8)
-
-        # 3. 密集采样画圆
-        num_steps = 200
-        for i in range(num_steps):
-            t = i / (num_steps - 1)
-            pt = self.get_bezier_point(t, points) * scale
-            current_width = w_start + (w_end - w_start) * t
-
-            cv2.circle(
-                img, (int(pt[0]), int(pt[1])), int(current_width * scale / 2), 255, -1
-            )
-
-        # 4. 下采样
-        img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_AREA)
-
-        return img, points, w_start, w_end
-
-    def to_tensor(self, img, points, w_start, w_end):
-        # 归一化图像
-        img_tensor = torch.from_numpy(img).float() / 255.0
-        img_tensor = img_tensor.unsqueeze(0)  # [1, 64, 64]
-
-        # 归一化坐标和宽度
-        norm_points = points / self.size
-        label = np.concatenate([norm_points.flatten(), [w_start / 10.0, w_end / 10.0]])
-
-        return img_tensor, torch.tensor(label, dtype=torch.float32)
-
-    def __getitem__(self, idx):
-        img, points, w_start, w_end = self.render_stroke()
-        return self.to_tensor(img, points, w_start, w_end)
-
-
-class MultiStrokeReconstructionDataset(Dataset):
-    """
-    连续多笔画重建数据集（Phase 1.5 使用）
-
-    关键：笔画是连续的，P0接上一条的P3
+    支持四种模式：
+    1. 'single': 单一贝塞尔曲线
+    2. 'independent': 多条独立贝塞尔曲线 (Set Prediction 任务)
+    3. 'continuous': 连续多段贝塞尔曲线 (序列生成任务)
+    4. 'multi_connected': 多条路径，每条路径包含多段曲线 (复杂文档布局模拟)
     """
 
-    def __init__(self, size=64, length=10000, max_strokes=8):
-        self.size = size
-        self.length = length
+    def __init__(
+        self,
+        mode="single",
+        img_size=64,
+        batch_size=64,
+        epoch_length=10000,
+        # 特定模式参数
+        max_strokes=None,  # mode='independent'
+        fixed_count=None,  # mode='independent' (可选，固定数量)
+        max_paths=None,  # mode='multi_connected'
+        max_segments=None,  # mode='continuous' or 'multi_connected'
+        seed=None,
+        rust_threads=None,  # 手动指定 Rust 内部线程数 (None=自动策略)
+    ):
+        """
+        参数:
+            mode (str): 生成模式 ['single', 'independent', 'continuous', 'multi_connected']
+            img_size (int): 图像尺寸 (WxH)
+            batch_size (int): Rust 内部生成时的批次大小。
+            epoch_length (int): 虚拟 epoch 长度。
+
+            rust_threads (int):
+                控制 Rust (Rayon) 并行线程数。
+                - None (默认): 自动策略。
+                    - 主进程模式 (num_workers=0): 不限制，使用所有 CPU 核心。
+                    -多进程模式 (num_workers>0): 限制为 1 线程，利用进程级并行。
+                - Int > 0: 强制指定每个进程/Worker 内的 Rust 线程数。
+                  (例如机器核心数很多，worker 数较少时，可以设为 >1)
+        """
+        super().__init__()
+        self.mode = mode
+        self.img_size = img_size
+        self.batch_size = batch_size
+        self.epoch_length = epoch_length
         self.max_strokes = max_strokes
+        self.fixed_count = fixed_count
+        self.max_paths = max_paths
+        self.max_segments = max_segments
+        self.rust_threads = rust_threads
 
-    def __len__(self):
-        return self.length
+        # 参数校验
+        self._validate_params()
 
-    def get_bezier_point(self, t, points):
-        p0, p1, p2, p3 = points
-        return (
-            (1 - t) ** 3 * p0
-            + 3 * (1 - t) ** 2 * t * p1
-            + 3 * (1 - t) * t**2 * p2
-            + t**3 * p3
-        )
-
-    def __getitem__(self, idx):
-        # 渐进式增加曲线数量
-        progress = idx / self.length
-        if progress < 0.3:
-            num_strokes = 1
-        elif progress < 0.6:
-            num_strokes = np.random.randint(1, 4)
-        else:
-            num_strokes = np.random.randint(1, self.max_strokes + 1)
-
-        # 生成连续的多笔画
-        scale = 2
-        canvas_size = self.size * scale
-        canvas = np.zeros((canvas_size, canvas_size), dtype=np.uint8)
-
-        current_point = np.random.rand(2) * self.size
-
-        for _ in range(num_strokes):
-            p0 = current_point
-
-            # 生成方向和长度
-            direction = np.random.randn(2)
-            direction = direction / (np.linalg.norm(direction) + 1e-6)
-            length = np.random.uniform(8, 20)
-
-            p3 = p0 + direction * length
-
-            p1 = (
-                p0
-                + direction * length * np.random.uniform(0.2, 0.4)
-                + np.random.randn(2) * 3
-            )
-            p2 = (
-                p0
-                + direction * length * np.random.uniform(0.6, 0.8)
-                + np.random.randn(2) * 3
-            )
-
-            points = np.stack([p0, p1, p2, p3])
-
-            w_start = np.random.uniform(2.0, 5.0)
-            w_end = np.random.uniform(2.0, 5.0)
-
-            # 渲染
-            num_steps = 200
-            for i in range(num_steps):
-                t = i / (num_steps - 1)
-                pt = self.get_bezier_point(t, points) * scale
-                current_width = w_start + (w_end - w_start) * t
-
-                cv2.circle(
-                    canvas,
-                    (int(pt[0]), int(pt[1])),
-                    int(current_width * scale / 2),
-                    255,
-                    -1,
+    def _validate_params(self):
+        if self.mode == "independent":
+            if self.max_strokes is None:
+                raise ValueError("Mode 'independent' requires 'max_strokes'")
+        elif self.mode == "continuous":
+            if self.max_segments is None:
+                raise ValueError("Mode 'continuous' requires 'max_segments'")
+        elif self.mode == "multi_connected":
+            if self.max_paths is None or self.max_segments is None:
+                raise ValueError(
+                    "Mode 'multi_connected' requires 'max_paths' and 'max_segments'"
                 )
 
-            current_point = p3
+    def _generate_batch(self):
+        """调用 Rust 扩展生成一批数据"""
+        if self.mode == "single":
+            return ink_trace_rs.generate_single_stroke_batch(
+                self.batch_size, self.img_size
+            )
+        elif self.mode == "independent":
+            return ink_trace_rs.generate_independent_strokes_batch(
+                self.batch_size, self.img_size, self.max_strokes, self.fixed_count
+            )
+        elif self.mode == "continuous":
+            return ink_trace_rs.generate_continuous_strokes_batch(
+                self.batch_size, self.img_size, self.max_segments
+            )
+        elif self.mode == "multi_connected":
+            return ink_trace_rs.generate_multi_connected_strokes_batch(
+                self.batch_size, self.img_size, self.max_paths, self.max_segments
+            )
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
 
-        # 下采样
-        canvas = cv2.resize(
-            canvas, (self.size, self.size), interpolation=cv2.INTER_AREA
-        )
+    def __iter__(self):
+        """
+        生成器入口。
+        处理多进程 Worker 分割情况，确保数据量分配正确。
+        """
+        worker_info = torch.utils.data.get_worker_info()
 
-        img_tensor = torch.from_numpy(canvas).float() / 255.0
-        img_tensor = img_tensor.unsqueeze(0)  # [1, 64, 64]
+        # 配置 Rayon 线程数
+        # 策略：
+        # 1. 只有当 worker_info 存在（即处于 DataLoader Worker 子进程中）且 rust_threads 未手动指定时，
+        #    才强制设为 1，防止 CPU 过载。
+        # 2. 如果 rust_threads 有值，则无条件执行设置。
+        # 3. 如果在主进程 (num_workers=0) 且 rust_threads=None，则不限制（Rayon 默认全核）。
 
-        return img_tensor, img_tensor.clone()
+        target_threads = None
 
+        if self.rust_threads is not None:
+            target_threads = self.rust_threads
+        elif worker_info is not None:
+            # 多进程默认策略：防止争抢
+            target_threads = 1
 
-class IndependentStrokesDataset(Dataset):
-    """
-    独立多笔画数据集（Phase 1.6, Phase 2 使用）
+        if target_threads is not None:
+            try:
+                if hasattr(ink_trace_rs, "set_rayon_threads"):
+                    ink_trace_rs.set_rayon_threads(target_threads)
+            except RuntimeError:
+                # Rayon 全局线程池只能初始化一次，后续调用会报错，忽略即可
+                pass
 
-    关键：每个笔画是独立的，不连接
-    用于 DETR 风格的 Set Prediction
-    """
+        if worker_info is None:
+            # 单进程
+            total_items = self.epoch_length
+        else:
+            # 多进程：将总长度均分给每个 worker
+            per_worker = int(
+                math.ceil(self.epoch_length / float(worker_info.num_workers))
+            )
+            total_items = per_worker
 
-    def __init__(self, size=64, length=10000, max_strokes=8):
-        self.size = size
-        self.length = length
-        self.max_strokes = max_strokes
+            # 可以在这里根据 worker_id 设置不同的 Rust 种子（如果 Rust 接口支持）
+            # 目前 Rust 使用 thread_rng，本身就是线程安全的且各不相同
+
+        generated_count = 0
+
+        while generated_count < total_items:
+            # 1. 调用 Rust 高效生成一批
+            try:
+                imgs, labels = self._generate_batch()
+            except Exception as e:
+                print(f"Rust generation failed: {e}")
+                raise e
+
+            curr_batch_len = len(imgs)
+
+            # 2. 逐个 Yield 给 DataLoader
+            for i in range(curr_batch_len):
+                if generated_count >= total_items:
+                    break
+
+                # numpy -> tensor
+                # 增加 Channel 维度: [H, W] -> [1, H, W]
+                # 注意：Rust 返回的是 float32 且已归一化到 0-1
+                img_tensor = torch.from_numpy(imgs[i]).unsqueeze(0)
+                label_tensor = torch.from_numpy(labels[i])
+
+                yield img_tensor, label_tensor
+                generated_count += 1
 
     def __len__(self):
-        return self.length
+        return self.epoch_length
 
-    def get_bezier_point(self, t, points):
-        p0, p1, p2, p3 = points
-        return (
-            (1 - t) ** 3 * p0
-            + 3 * (1 - t) ** 2 * t * p1
-            + 3 * (1 - t) * t**2 * p2
-            + t**3 * p3
-        )
 
-    def __getitem__(self, idx):
-        # 渐进式增加笔画数量
-        progress = idx / self.length
-        if progress < 0.3:
-            num_strokes = np.random.randint(1, 3)
-        elif progress < 0.6:
-            num_strokes = np.random.randint(1, 5)
+class MixedInkTraceDataset(IterableDataset):
+    """
+    混合多种生成模式的数据集。
+    如果你想在一个 Epoch 里同时训练单笔画、连续笔画等，可以使用这个类。
+
+    实现方式：
+    内部根据配置实例化多个 InkTraceDataset 的生成逻辑，
+    在迭代时随机选择一种模式生成一个 Batch。
+    """
+
+    def __init__(self, configs, epoch_length=10000, batch_size=64, rust_threads=None):
+        """
+        Args:
+            configs: 列表，每个元素为 (kwargs_dict, probability)
+            epoch_length: epoch 长度
+            batch_size: batch 大小
+            rust_threads: Rayon 线程数设置 (透传给子 Dataset)
+        """
+        super().__init__()
+        self.configs = configs
+        self.epoch_length = epoch_length
+        self.batch_size = batch_size
+        self.rust_threads = rust_threads
+
+        # 预先根据配置创建多个 dataset 实例（仅用于借用它们的生成逻辑）
+        self.datasets = []
+        self.probs = []
+
+        for kwargs, prob in configs:
+            # 强制与其共享 batch_size，便于管理
+            kwargs["batch_size"] = self.batch_size
+            kwargs["epoch_length"] = self.epoch_length
+            kwargs["rust_threads"] = self.rust_threads  # 统一透传
+
+            ds = InkTraceDataset(**kwargs)
+            self.datasets.append(ds)
+            self.probs.append(prob)
+
+        # 归一化概率
+        total_prob = sum(self.probs)
+        self.probs = [p / total_prob for p in self.probs]
+
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+
+        # 同样的 Rayon 线程保护逻辑
+        target_threads = None
+
+        if self.rust_threads is not None:
+            target_threads = self.rust_threads
+        elif worker_info is not None:
+            target_threads = 1
+
+        if target_threads is not None:
+            try:
+                if hasattr(ink_trace_rs, "set_rayon_threads"):
+                    ink_trace_rs.set_rayon_threads(target_threads)
+            except RuntimeError:
+                pass
+
+        if worker_info is None:
+            total_items = self.epoch_length
         else:
-            num_strokes = np.random.randint(1, self.max_strokes + 1)
-
-        # 生成独立笔画
-        canvas, strokes = self.generate_independent_strokes(num_strokes)
-
-        # 转为 tensor
-        img_tensor = torch.from_numpy(canvas).float() / 255.0
-        img_tensor = img_tensor.unsqueeze(0)  # [1, 64, 64]
-
-        # 准备 GT
-        target = self.prepare_target(strokes)
-
-        return img_tensor, target
-
-    def generate_independent_strokes(self, num_strokes):
-        """生成多个独立的笔画"""
-        scale = 2
-        canvas_size = self.size * scale
-        canvas = np.zeros((canvas_size, canvas_size), dtype=np.uint8)
-
-        strokes = []
-
-        for _ in range(num_strokes):
-            # 每个笔画完全独立，随机起点
-            p0 = np.random.rand(2) * self.size * 0.8 + self.size * 0.1
-
-            # 随机方向和长度
-            angle = np.random.uniform(0, 2 * np.pi)
-            direction = np.array([np.cos(angle), np.sin(angle)])
-            length = np.random.uniform(10, 25)
-
-            # P3
-            p3 = p0 + direction * length
-
-            # P1, P2
-            p1 = (
-                p0
-                + direction * length * np.random.uniform(0.2, 0.4)
-                + np.random.randn(2) * 2
+            per_worker = int(
+                math.ceil(self.epoch_length / float(worker_info.num_workers))
             )
-            p2 = (
-                p0
-                + direction * length * np.random.uniform(0.6, 0.8)
-                + np.random.randn(2) * 2
-            )
+            total_items = per_worker
 
-            points = np.stack([p0, p1, p2, p3])
+        generated_count = 0
 
-            # 随机宽度
-            w_start = np.random.uniform(2.0, 5.0)
-            w_end = np.random.uniform(2.0, 5.0)
+        while generated_count < total_items:
+            # 随机选择一个 Dataset 模式
+            # np.random.choice 不支持对象数组，所以用索引
+            dataset_idx = np.random.choice(len(self.datasets), p=self.probs)
+            chosen_dataset = self.datasets[dataset_idx]
 
-            # 渲染
-            num_steps = 200
-            for i in range(num_steps):
-                t = i / (num_steps - 1)
-                pt = self.get_bezier_point(t, points) * scale
-                current_width = w_start + (w_end - w_start) * t
+            # 生成 Batch
+            imgs, labels = chosen_dataset._generate_batch()
+            curr_batch_len = len(imgs)
 
-                cv2.circle(
-                    canvas,
-                    (int(pt[0]), int(pt[1])),
-                    int(current_width * scale / 2),
-                    255,
-                    -1,
-                )
+            for i in range(curr_batch_len):
+                if generated_count >= total_items:
+                    break
 
-            strokes.append({"points": points, "w_start": w_start, "w_end": w_end})
+                img_tensor = torch.from_numpy(imgs[i]).unsqueeze(0)
+                label_tensor = torch.from_numpy(labels[i])
 
-        # 按 P0 的 Y 坐标排序，使得 GT 顺序相对固定，减少匈牙利匹配的震荡
-        strokes.sort(key=lambda s: s["points"][0, 1])
+                # 警告：不同模式的 label 形状可能不一致。
+                # 如果混合使用，请确保你的 collate_fn 能处理不同形状的 label，
+                # 或者只混合 label 形状兼容的模式。
+                yield img_tensor, label_tensor
+                generated_count += 1
 
-        # 下采样
-        canvas = cv2.resize(
-            canvas, (self.size, self.size), interpolation=cv2.INTER_AREA
-        )
-
-        return canvas, strokes
-
-    def prepare_target(self, strokes):
-        """
-        准备 GT tensor
-
-        Returns:
-            target: [max_strokes, 11]
-                    前 10 维：笔画参数 (P0, P1, P2, P3, w_start, w_end)
-                    最后 1 维：有效性标志
-        """
-        num_strokes = len(strokes)
-        target = np.zeros((self.max_strokes, 11), dtype=np.float32)
-
-        for i in range(self.max_strokes):
-            if i < num_strokes:
-                stroke = strokes[i]
-                points = stroke["points"] / self.size  # 归一化到 [0, 1]
-
-                # P0, P1, P2, P3 的坐标
-                target[i, :8] = points.flatten()
-                target[i, 8:10] = [stroke["w_start"] / 10.0, stroke["w_end"] / 10.0]
-                target[i, 10] = 1.0  # 有效标志
-            else:
-                target[i, 10] = 0.0  # 无效
-
-        return torch.from_numpy(target)
+    def __len__(self):
+        return self.epoch_length

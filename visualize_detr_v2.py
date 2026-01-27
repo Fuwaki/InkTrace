@@ -11,7 +11,7 @@ from matplotlib.patches import PathPatch
 from matplotlib.path import Path
 
 from models import ModelFactory
-from datasets import IndependentStrokesDataset
+from dataset import IndependentStrokesDataset
 
 
 def draw_bezier_strokes(ax, strokes, validity, threshold=0.5, color="red"):

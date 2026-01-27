@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, Subset
 import numpy as np
 
 from models import ModelFactory
-from datasets import IndependentStrokesDataset
+from dataset import IndependentStrokesDataset
 from losses import DETRLoss
 
 
@@ -28,25 +28,25 @@ def train_phase2_detr():
 
     config = {
         # 数据
-        "dataset_size": 30000,  # 增加数据量
+        "dataset_size": 100000,  # RTX 5090: 大幅增加数据量 (30k -> 100k)
         "max_strokes": 8,
-        "batch_size": 32,  # 增大 batch size
+        "batch_size": 512,  # RTX 5090: 显存充裕，大幅增加 Batch (32 -> 512)，稳定梯度
         # 模型
         "num_slots": 8,
         "embed_dim": 128,
         # 阶段 1：冻结 Encoder
-        "phase1_lr": 1e-3,  # 提高初始学习率
-        "phase1_epochs": 80,  # 增加 epoch
+        "phase1_lr": 1e-3,
+        "phase1_epochs": 50,  # 数据量变大，Epoch 数可以适当减少
         # 阶段 2：端到端
-        "phase2_lr": 5e-5,  # 降低学习率
+        "phase2_lr": 1e-4,  # 大 Batch 下可以适当提高微调 LR
         "phase2_epochs": 30,
         # 损失权重
         "coord_weight": 5.0,
         "width_weight": 2.0,
         "validity_weight": 2.0,
         # 训练技巧
-        "grad_clip": 1.0,  # 梯度裁剪
-        "warmup_epochs": 5,  # 学习率预热
+        "grad_clip": 1.0,
+        "warmup_epochs": 5,
     }
 
     if torch.cuda.is_available():
@@ -82,7 +82,10 @@ def train_phase2_detr():
         # 加载 Encoder 权重
         model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
         print(f"  Encoder Epoch: {checkpoint['epoch']}")
-
+        # 加载 Pixel Decoder 权重 (如果存在且模型需要)
+        if model.pixel_decoder is not None and "decoder_state_dict" in checkpoint:
+            model.pixel_decoder.load_state_dict(checkpoint["decoder_state_dict"])
+            print("  Pixel Decoder 参数已加载")
     except FileNotFoundError:
         print("  未找到 Phase 1.6 模型，从头创建...")
         model = ModelFactory.create_vectorization_model(
@@ -112,8 +115,10 @@ def train_phase2_detr():
         dataset,
         batch_size=config["batch_size"],
         shuffle=True,
-        num_workers=4,
+        num_workers=12,  # 16核 CPU: 使用 12 个 worker 生成数据
         pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True,
     )
 
     print(f"  数据集大小: {len(dataset)}")

@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from models import ModelFactory, ReconstructionModel
-from datasets import MultiStrokeReconstructionDataset
+from dataset import MultiStrokeReconstructionDataset
 
 
 def train_phase1_5():
