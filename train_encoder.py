@@ -86,6 +86,27 @@ PHASE_CONFIGS = {
             "max_segments": 6,
         },
     },
+    "1.8": {
+        "name": "Phase 1.8: 全模式联合训练 (防止遗忘)",
+        "mode": "mixed",  # 特殊模式标记
+        "checkpoint_name": "best_reconstruction_final.pth",
+        "default_epochs": 50,
+        "default_lr": 1e-4,  # 降低学习率进行微调
+        "default_batch_size": 32,
+        "dataset_params": {
+            # 混合比例配置
+            "configs": [
+                # (参数字典, 概率权重)
+                ({"mode": "single"}, 0.2),  # 20% 简单单笔画
+                ({"mode": "continuous", "max_segments": 8}, 0.3),  # 30% 连笔
+                ({"mode": "independent", "max_strokes": 8}, 0.3),  # 30% 独立多笔画
+                (
+                    {"mode": "multi_connected", "max_paths": 4, "max_segments": 6},
+                    0.2,
+                ),  # 20% 复杂文档
+            ]
+        },
+    },
 }
 
 
@@ -345,6 +366,8 @@ def create_dataset(
     phase_config, dataset_size, batch_size, num_workers, rust_threads=None
 ):
     """创建数据集和 DataLoader"""
+    from datasets import MixedInkTraceDataset  # 确保导入
+
     mode = phase_config["mode"]
     dataset_params = phase_config["dataset_params"].copy()
 
@@ -353,17 +376,32 @@ def create_dataset(
     print(f"  Epoch 大小: {dataset_size}")
     if rust_threads is not None:
         print(f"  Rust Threads: {rust_threads}")
-    for k, v in dataset_params.items():
-        print(f"  {k}: {v}")
 
-    dataset = InkTraceDataset(
-        mode=mode,
-        img_size=64,
-        batch_size=batch_size,  # Rust 内部 batch
-        epoch_length=dataset_size,
-        rust_threads=rust_threads,
-        **dataset_params,
-    )
+    if mode == "mixed":
+        # 处理混合数据集配置
+        configs = dataset_params.pop("configs")
+        print("  混合策略:")
+        for cfg, prob in configs:
+            print(f"    - {cfg['mode']}: {prob:.0%}")
+
+        dataset = MixedInkTraceDataset(
+            configs=configs,
+            epoch_length=dataset_size,
+            batch_size=batch_size,
+            rust_threads=rust_threads,
+        )
+    else:
+        for k, v in dataset_params.items():
+            print(f"  {k}: {v}")
+
+        dataset = InkTraceDataset(
+            mode=mode,
+            img_size=64,
+            batch_size=batch_size,  # Rust 内部 batch
+            epoch_length=dataset_size,
+            rust_threads=rust_threads,
+            **dataset_params,
+        )
 
     # 使用 IterableDataset 时，shuffle 在内部处理
     dataloader = DataLoader(
@@ -492,6 +530,20 @@ def train(args):
 
     # 获取阶段配置
     phase_config = PHASE_CONFIGS[args.phase]
+
+    # 针对 Phase 1.8 自动设置为 fine-tuning 模式
+    if args.phase == "1.8" and args.resume is None and not args.from_scratch:
+        print(
+            "提示: Phase 1.8 默认为联合微调，若未指定 checkpoint，将尝试自动加载 Phase 1.7 的最佳模型"
+        )
+        # 尝试寻找上一阶段的模型
+        prev_model = "best_reconstruction_multipath.pth"
+        if os.path.exists(prev_model):
+            args.resume = prev_model
+            print(f"  ✓ 自动找到上一阶段模型: {prev_model}")
+        else:
+            print(f"  ! 未找到上一阶段模型，将从零开始训练")
+
     print("\n" + "=" * 60)
     print(f"  {phase_config['name']}")
     print("=" * 60)
