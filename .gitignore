@@ -3,3 +3,4 @@ data
 mnist_data
 *.png
 target
+*.pyc
