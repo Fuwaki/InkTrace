@@ -8,7 +8,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 
-from model import StrokeEncoder
+from encoder import StrokeEncoder
 from pixel_decoder import PixelDecoder
 
 

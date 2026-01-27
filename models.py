@@ -147,7 +147,7 @@ class ModelFactory:
         Returns:
             ReconstructionModel
         """
-        from model import StrokeEncoder
+        from encoder import StrokeEncoder
         from pixel_decoder import PixelDecoder
 
         encoder = StrokeEncoder(
@@ -171,7 +171,7 @@ class ModelFactory:
         Returns:
             VectorizationModel
         """
-        from model import StrokeEncoder
+        from encoder import StrokeEncoder
         from pixel_decoder import PixelDecoder
         from detr_decoder import DETRVectorDecoder
 
@@ -202,7 +202,7 @@ class ModelFactory:
         Returns:
             ReconstructionModel
         """
-        from model import StrokeEncoder
+        from encoder import StrokeEncoder
         from pixel_decoder import PixelDecoder
 
         checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -230,7 +230,7 @@ class ModelFactory:
         Returns:
             VectorizationModel
         """
-        from model import StrokeEncoder
+        from encoder import StrokeEncoder
         from pixel_decoder import PixelDecoder
         from detr_decoder import DETRVectorDecoder
 
