@@ -14,3 +14,4 @@ numpy
 pillow
 matplotlib
 tqdm
+timm

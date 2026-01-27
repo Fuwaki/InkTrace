@@ -194,6 +194,12 @@ def parse_args():
         default=4,
         help="DataLoader workers 数量 (默认: 4)",
     )
+    parser.add_argument(
+        "--rust-threads",
+        type=int,
+        default=None,
+        help="Rust 后端每个 worker 的线程数 (默认: 自动控制)",
+    )
 
     # 日志参数
     parser.add_argument(
@@ -326,7 +332,7 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     torch.save(checkpoint, save_path)
 
 
-def create_dataset(phase_config, dataset_size, batch_size, num_workers):
+def create_dataset(phase_config, dataset_size, batch_size, num_workers, rust_threads=None):
     """创建数据集和 DataLoader"""
     mode = phase_config["mode"]
     dataset_params = phase_config["dataset_params"].copy()
@@ -334,6 +340,8 @@ def create_dataset(phase_config, dataset_size, batch_size, num_workers):
     print(f"\n创建数据集...")
     print(f"  模式: {mode}")
     print(f"  Epoch 大小: {dataset_size}")
+    if rust_threads is not None:
+        print(f"  Rust Threads: {rust_threads}")
     for k, v in dataset_params.items():
         print(f"  {k}: {v}")
 
@@ -342,6 +350,7 @@ def create_dataset(phase_config, dataset_size, batch_size, num_workers):
         img_size=64,
         batch_size=batch_size,  # Rust 内部 batch
         epoch_length=dataset_size,
+        rust_threads=rust_threads,
         **dataset_params,
     )
 
@@ -490,7 +499,7 @@ def train(args):
 
     # 创建数据集
     dataset, dataloader = create_dataset(
-        phase_config, args.dataset_size, batch_size, args.num_workers
+        phase_config, args.dataset_size, batch_size, args.num_workers, args.rust_threads
     )
 
     # 损失函数和优化器
