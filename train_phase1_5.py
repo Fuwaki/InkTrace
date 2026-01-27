@@ -285,6 +285,7 @@ def visualize_reconstruction(encoder, decoder, dataset, device, num_samples=4):
             axes[1, i].axis('off')
 
     plt.tight_layout()
+    
     plt.savefig('reconstruction_multi_comparison.png', dpi=150, bbox_inches='tight')
     print("  ✓ 保存图像: reconstruction_multi_comparison.png")
     # plt.show()

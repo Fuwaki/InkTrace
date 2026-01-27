@@ -1,5 +1,7 @@
 """
-可视化 DETR 风格的矢量化结果
+DETR 矢量化结果可视化
+
+使用 best_detr_vectorization.pth 模型可视化矢量化结果
 """
 
 import torch
@@ -7,10 +9,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path
-from matplotlib.collections import LineCollection
 
 from model import StrokeEncoder
-from vector_decoder_detr import DETRVectorDecoder, IndependentStrokesDataset
+from detr_decoder import DETRVectorDecoder
+from datasets import IndependentStrokesDataset
 
 
 def load_detr_model(checkpoint_path, device):
@@ -55,7 +57,7 @@ def draw_bezier_strokes(ax, strokes, validity, threshold=0.5, color='red'):
     if not valid_mask.any():
         return
 
-    valid_strokes = strokes[valid_mask]  # [N, 10]
+    valid_strokes = strokes[valid_mask]
 
     for stroke in valid_strokes:
         # 提取控制点
@@ -75,7 +77,7 @@ def draw_bezier_strokes(ax, strokes, validity, threshold=0.5, color='red'):
 
         path = Path(verts, codes)
 
-        # 绘制（用宽度作为线宽）
+        # 绘制
         avg_width = (w_start + w_end) / 2
         patch = PathPatch(
             path,
@@ -85,9 +87,6 @@ def draw_bezier_strokes(ax, strokes, validity, threshold=0.5, color='red'):
             alpha=0.8
         )
         ax.add_patch(patch)
-
-        # 绘制控制点（可选，用于调试）
-        # ax.plot(points[:, 0], points[:, 1], 'g.', markersize=2)
 
 
 def visualize_detr_predictions(encoder, detr_decoder, dataset, device, num_samples=6):
@@ -174,19 +173,16 @@ def compute_metrics(encoder, detr_decoder, dataset, device, num_samples=100):
 
             # 如果都有笔画，计算误差
             if num_gt > 0 and num_pred > 0:
-                gt_curves = gt_strokes[valid_gt_mask]  # [N, 10]
-                pred_curves = pred_strokes[valid_pred_mask]  # [M, 10]
+                gt_curves = gt_strokes[valid_gt_mask]
+                pred_curves = pred_strokes[valid_pred_mask]
 
-                # 取最小数量（简化）
                 min_curves = min(gt_curves.shape[0], pred_curves.shape[0])
 
-                # 坐标误差
                 coord_error = torch.abs(
                     gt_curves[:min_curves, :8] - pred_curves[:min_curves, :8]
                 ).mean().item()
                 coord_errors.append(coord_error)
 
-                # 宽度误差
                 width_error = torch.abs(
                     gt_curves[:min_curves, 8:10] - pred_curves[:min_curves, 8:10]
                 ).mean().item()
@@ -203,7 +199,6 @@ def compute_metrics(encoder, detr_decoder, dataset, device, num_samples=100):
 
     print(f"笔画数量误差: {np.mean(count_errors):.2f} ± {np.std(count_errors):.2f}")
 
-    # 详细统计
     correct_counts = sum(1 for e in count_errors if e == 0)
     print(f"\n笔画数量准确率: {correct_counts}/{len(count_errors)} ({100*correct_counts/len(count_errors):.1f}%)")
 
@@ -237,32 +232,6 @@ def test_single_sample(encoder, detr_decoder, dataset, device, index=0):
     print(f"  GT 笔画数: {num_gt}")
     print(f"  预测笔画数: {num_pred}")
 
-    # 打印 GT 笔画
-    print("\n  GT 笔画:")
-    valid_gt_mask = gt_validity.squeeze(-1) > 0.5
-    for i, is_valid in enumerate(valid_gt_mask):
-        if is_valid:
-            stroke = gt_strokes[i]
-            x0, y0 = stroke[0:2] * 64
-            x3, y3 = stroke[6:8] * 64
-            print(f"    笔画 {i+1}: P0=({x0:.1f}, {y0:.1f}), P3=({x3:.1f}, {y3:.1f})")
-
-    # 打印预测笔画
-    print("\n  预测笔画:")
-    pred_strokes_np = pred_strokes.cpu().squeeze(0).numpy()
-    pred_validity_np = pred_validity.cpu().squeeze(0).unsqueeze(-1).numpy()
-    valid_pred_mask = pred_validity_np.squeeze(-1) > 0.5
-
-    for i, is_valid in enumerate(valid_pred_mask):
-        if is_valid:
-            stroke = pred_strokes_np[i]
-            x0, y0 = stroke[0:2] * 64
-            x3, y3 = stroke[6:8] * 64
-            w_start, w_end = stroke[8:10]
-            val = pred_validity_np[i][0]
-            print(f"    笔画 {i+1}: P0=({x0:.1f}, {y0:.1f}), P3=({x3:.1f}, {y3:.1f}), "
-                  f"width=({w_start:.2f}, {w_end:.2f}), validity={val:.3f}")
-
     # 可视化
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
@@ -279,6 +248,8 @@ def test_single_sample(encoder, detr_decoder, dataset, device, index=0):
 
     # 预测
     axes[2].imshow(img, cmap='gray', vmin=0, vmax=255, alpha=0.5)
+    pred_strokes_np = pred_strokes.cpu().squeeze(0).numpy()
+    pred_validity_np = pred_validity.cpu().squeeze(0).unsqueeze(-1).numpy()
     draw_bezier_strokes(axes[2], pred_strokes_np, pred_validity_np, threshold=0.5, color='red')
     axes[2].set_title(f'Prediction ({num_pred} strokes)')
     axes[2].axis('off')
