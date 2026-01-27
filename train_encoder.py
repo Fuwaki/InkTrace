@@ -332,7 +332,9 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     torch.save(checkpoint, save_path)
 
 
-def create_dataset(phase_config, dataset_size, batch_size, num_workers, rust_threads=None):
+def create_dataset(
+    phase_config, dataset_size, batch_size, num_workers, rust_threads=None
+):
     """创建数据集和 DataLoader"""
     mode = phase_config["mode"]
     dataset_params = phase_config["dataset_params"].copy()
