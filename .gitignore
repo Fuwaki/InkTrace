@@ -29,4 +29,4 @@ target/
 # 编辑器配置 (可选)
 .vscode/
 .idea/
-.DS_Store
+.DS_Storeruns/
