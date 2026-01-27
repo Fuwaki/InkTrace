@@ -57,8 +57,16 @@ class MultiStrokeReconstructionDataset:
             p3 = p0 + direction * length
 
             # P1, P2 在中间，加随机扰动
-            p1 = p0 + direction * length * np.random.uniform(0.2, 0.4) + np.random.randn(2) * 3
-            p2 = p0 + direction * length * np.random.uniform(0.6, 0.8) + np.random.randn(2) * 3
+            p1 = (
+                p0
+                + direction * length * np.random.uniform(0.2, 0.4)
+                + np.random.randn(2) * 3
+            )
+            p2 = (
+                p0
+                + direction * length * np.random.uniform(0.6, 0.8)
+                + np.random.randn(2) * 3
+            )
 
             points = np.stack([p0, p1, p2, p3])
 
@@ -74,25 +82,25 @@ class MultiStrokeReconstructionDataset:
                 current_width = w_start + (w_end - w_start) * t
 
                 import cv2
+
                 cv2.circle(
                     canvas,
                     (int(pt[0]), int(pt[1])),
                     int(current_width * scale / 2),
                     255,
-                    -1
+                    -1,
                 )
 
-            curves.append({
-                'points': points,
-                'w_start': w_start,
-                'w_end': w_end
-            })
+            curves.append({"points": points, "w_start": w_start, "w_end": w_end})
 
             current_point = p3
 
         # 下采样
         import cv2
-        canvas = cv2.resize(canvas, (self.size, self.size), interpolation=cv2.INTER_AREA)
+
+        canvas = cv2.resize(
+            canvas, (self.size, self.size), interpolation=cv2.INTER_AREA
+        )
 
         return canvas, curves, num_strokes
 
@@ -116,8 +124,8 @@ def load_model(checkpoint_path, device):
     ).to(device)
     pixel_decoder = PixelDecoder(embed_dim=128).to(device)
 
-    encoder.load_state_dict(checkpoint['encoder_state_dict'])
-    pixel_decoder.load_state_dict(checkpoint['decoder_state_dict'])
+    encoder.load_state_dict(checkpoint["encoder_state_dict"])
+    pixel_decoder.load_state_dict(checkpoint["decoder_state_dict"])
 
     encoder.eval()
     pixel_decoder.eval()
@@ -128,14 +136,16 @@ def load_model(checkpoint_path, device):
     return encoder, pixel_decoder
 
 
-def visualize_reconstruction_multi_stroke(encoder, decoder, dataset, device, num_samples=8):
+def visualize_reconstruction_multi_stroke(
+    encoder, decoder, dataset, device, num_samples=8
+):
     """可视化多笔画重建效果"""
     encoder.eval()
     decoder.eval()
 
     # 创建 3 行：原图、重建图、差异图
-    fig, axes = plt.subplots(3, num_samples, figsize=(3*num_samples, 9))
-    fig.suptitle('Multi-Stroke Reconstruction (Phase 1.5)', fontsize=16)
+    fig, axes = plt.subplots(3, num_samples, figsize=(3 * num_samples, 9))
+    fig.suptitle("Multi-Stroke Reconstruction (Phase 1.5)", fontsize=16)
 
     with torch.no_grad():
         for i in range(num_samples):
@@ -154,22 +164,22 @@ def visualize_reconstruction_multi_stroke(encoder, decoder, dataset, device, num
             diff = np.abs(img - recon_img)
 
             # 显示原图
-            axes[0, i].imshow(img, cmap='gray', vmin=0, vmax=255)
-            axes[0, i].set_title(f'Original ({num_strokes} strokes)', fontsize=10)
-            axes[0, i].axis('off')
+            axes[0, i].imshow(img, cmap="gray", vmin=0, vmax=255)
+            axes[0, i].set_title(f"Original ({num_strokes} strokes)", fontsize=10)
+            axes[0, i].axis("off")
 
             # 显示重建图
-            axes[1, i].imshow(recon_img, cmap='gray', vmin=0, vmax=255)
-            axes[1, i].set_title(f'Reconstructed', fontsize=10)
-            axes[1, i].axis('off')
+            axes[1, i].imshow(recon_img, cmap="gray", vmin=0, vmax=255)
+            axes[1, i].set_title(f"Reconstructed", fontsize=10)
+            axes[1, i].axis("off")
 
             # 显示差异图
-            axes[2, i].imshow(diff, cmap='hot', vmin=0, vmax=50)
-            axes[2, i].set_title(f'Diff (max={diff.max():.1f})', fontsize=10)
-            axes[2, i].axis('off')
+            axes[2, i].imshow(diff, cmap="hot", vmin=0, vmax=50)
+            axes[2, i].set_title(f"Diff (max={diff.max():.1f})", fontsize=10)
+            axes[2, i].axis("off")
 
     plt.tight_layout()
-    plt.savefig('multi_stroke_reconstruction.png', dpi=150, bbox_inches='tight')
+    plt.savefig("multi_stroke_reconstruction.png", dpi=150, bbox_inches="tight")
     print(f"✓ 保存图像: multi_stroke_reconstruction.png")
     plt.show()
 
@@ -182,13 +192,17 @@ def test_different_num_strokes(encoder, decoder, device):
     # 测试 1, 2, 4, 8 条笔画
     num_strokes_list = [1, 2, 4, 8]
 
-    fig, axes = plt.subplots(2, len(num_strokes_list), figsize=(4*len(num_strokes_list), 8))
-    fig.suptitle('Reconstruction Quality vs Number of Strokes', fontsize=16)
+    fig, axes = plt.subplots(
+        2, len(num_strokes_list), figsize=(4 * len(num_strokes_list), 8)
+    )
+    fig.suptitle("Reconstruction Quality vs Number of Strokes", fontsize=16)
 
     with torch.no_grad():
         for idx, num_strokes in enumerate(num_strokes_list):
             # 生成指定数量的笔画
-            dataset = MultiStrokeReconstructionDataset(size=64, length=100, max_strokes=8)
+            dataset = MultiStrokeReconstructionDataset(
+                size=64, length=100, max_strokes=8
+            )
             canvas, curves, _ = dataset.generate_multi_strokes(num_strokes)
 
             img = canvas  # 已经是 numpy 数组
@@ -206,17 +220,17 @@ def test_different_num_strokes(encoder, decoder, device):
             max_diff = np.max(np.abs(img - recon_img))
 
             # 显示原图
-            axes[0, idx].imshow(img, cmap='gray', vmin=0, vmax=255)
-            axes[0, idx].set_title(f'{num_strokes} Stroke(s)', fontsize=12)
-            axes[0, idx].axis('off')
+            axes[0, idx].imshow(img, cmap="gray", vmin=0, vmax=255)
+            axes[0, idx].set_title(f"{num_strokes} Stroke(s)", fontsize=12)
+            axes[0, idx].axis("off")
 
             # 显示重建图
-            axes[1, idx].imshow(recon_img, cmap='gray', vmin=0, vmax=255)
-            axes[1, idx].set_title(f'Reconstructed\nMSE={mse:.4f}', fontsize=10)
-            axes[1, idx].axis('off')
+            axes[1, idx].imshow(recon_img, cmap="gray", vmin=0, vmax=255)
+            axes[1, idx].set_title(f"Reconstructed\nMSE={mse:.4f}", fontsize=10)
+            axes[1, idx].axis("off")
 
     plt.tight_layout()
-    plt.savefig('multi_stroke_quality_comparison.png', dpi=150, bbox_inches='tight')
+    plt.savefig("multi_stroke_quality_comparison.png", dpi=150, bbox_inches="tight")
     print(f"✓ 保存图像: multi_stroke_quality_comparison.png")
     plt.show()
 
@@ -263,28 +277,28 @@ def compute_statistics(encoder, decoder, dataset, device, num_samples=100):
 
 def main():
     # 设备检测
-    device = 'cpu'
     if torch.cuda.is_available():
-        device = 'cuda'
-    elif hasattr(torch, 'xpu') and torch.xpu.is_available():
-        device = 'xpu'
+        device = "cuda"
+        torch.backends.cudnn.benchmark = True
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = "xpu"
+    else:
+        device = "cpu"
 
     print(f"使用设备: {device}")
 
     # 加载模型
-    encoder, pixel_decoder = load_model('best_reconstruction_multi.pth', device)
+    encoder, pixel_decoder = load_model("best_reconstruction_multi.pth", device)
 
     # 创建数据集
     print("\n创建多笔画数据集...")
-    dataset = MultiStrokeReconstructionDataset(
-        size=64,
-        length=500,
-        max_strokes=8
-    )
+    dataset = MultiStrokeReconstructionDataset(size=64, length=500, max_strokes=8)
 
     # 可视化 1：多样本重建
     print("\n可视化 1: 多样本重建")
-    visualize_reconstruction_multi_stroke(encoder, pixel_decoder, dataset, device, num_samples=8)
+    visualize_reconstruction_multi_stroke(
+        encoder, pixel_decoder, dataset, device, num_samples=8
+    )
 
     # 可视化 2：不同笔画数量对比
     print("\n可视化 2: 不同笔画数量对比")
@@ -297,5 +311,5 @@ def main():
     print("\n完成!")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

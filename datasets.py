@@ -58,8 +58,7 @@ class StrokeDataset(Dataset):
             current_width = w_start + (w_end - w_start) * t
 
             cv2.circle(
-                img, (int(pt[0]), int(pt[1])),
-                int(current_width * scale / 2), 255, -1
+                img, (int(pt[0]), int(pt[1])), int(current_width * scale / 2), 255, -1
             )
 
         # 4. 下采样
@@ -74,10 +73,7 @@ class StrokeDataset(Dataset):
 
         # 归一化坐标和宽度
         norm_points = points / self.size
-        label = np.concatenate([
-            norm_points.flatten(),
-            [w_start / 10.0, w_end / 10.0]
-        ])
+        label = np.concatenate([norm_points.flatten(), [w_start / 10.0, w_end / 10.0]])
 
         return img_tensor, torch.tensor(label, dtype=torch.float32)
 
@@ -104,10 +100,10 @@ class MultiStrokeReconstructionDataset(Dataset):
     def get_bezier_point(self, t, points):
         p0, p1, p2, p3 = points
         return (
-            (1 - t) ** 3 * p0 +
-            3 * (1 - t) ** 2 * t * p1 +
-            3 * (1 - t) * t**2 * p2 +
-            t**3 * p3
+            (1 - t) ** 3 * p0
+            + 3 * (1 - t) ** 2 * t * p1
+            + 3 * (1 - t) * t**2 * p2
+            + t**3 * p3
         )
 
     def __getitem__(self, idx):
@@ -137,8 +133,16 @@ class MultiStrokeReconstructionDataset(Dataset):
 
             p3 = p0 + direction * length
 
-            p1 = p0 + direction * length * np.random.uniform(0.2, 0.4) + np.random.randn(2) * 3
-            p2 = p0 + direction * length * np.random.uniform(0.6, 0.8) + np.random.randn(2) * 3
+            p1 = (
+                p0
+                + direction * length * np.random.uniform(0.2, 0.4)
+                + np.random.randn(2) * 3
+            )
+            p2 = (
+                p0
+                + direction * length * np.random.uniform(0.6, 0.8)
+                + np.random.randn(2) * 3
+            )
 
             points = np.stack([p0, p1, p2, p3])
 
@@ -157,13 +161,15 @@ class MultiStrokeReconstructionDataset(Dataset):
                     (int(pt[0]), int(pt[1])),
                     int(current_width * scale / 2),
                     255,
-                    -1
+                    -1,
                 )
 
             current_point = p3
 
         # 下采样
-        canvas = cv2.resize(canvas, (self.size, self.size), interpolation=cv2.INTER_AREA)
+        canvas = cv2.resize(
+            canvas, (self.size, self.size), interpolation=cv2.INTER_AREA
+        )
 
         img_tensor = torch.from_numpy(canvas).float() / 255.0
         img_tensor = img_tensor.unsqueeze(0)  # [1, 64, 64]
@@ -190,10 +196,10 @@ class IndependentStrokesDataset(Dataset):
     def get_bezier_point(self, t, points):
         p0, p1, p2, p3 = points
         return (
-            (1 - t) ** 3 * p0 +
-            3 * (1 - t) ** 2 * t * p1 +
-            3 * (1 - t) * t**2 * p2 +
-            t**3 * p3
+            (1 - t) ** 3 * p0
+            + 3 * (1 - t) ** 2 * t * p1
+            + 3 * (1 - t) * t**2 * p2
+            + t**3 * p3
         )
 
     def __getitem__(self, idx):
@@ -239,8 +245,16 @@ class IndependentStrokesDataset(Dataset):
             p3 = p0 + direction * length
 
             # P1, P2
-            p1 = p0 + direction * length * np.random.uniform(0.2, 0.4) + np.random.randn(2) * 2
-            p2 = p0 + direction * length * np.random.uniform(0.6, 0.8) + np.random.randn(2) * 2
+            p1 = (
+                p0
+                + direction * length * np.random.uniform(0.2, 0.4)
+                + np.random.randn(2) * 2
+            )
+            p2 = (
+                p0
+                + direction * length * np.random.uniform(0.6, 0.8)
+                + np.random.randn(2) * 2
+            )
 
             points = np.stack([p0, p1, p2, p3])
 
@@ -260,17 +274,18 @@ class IndependentStrokesDataset(Dataset):
                     (int(pt[0]), int(pt[1])),
                     int(current_width * scale / 2),
                     255,
-                    -1
+                    -1,
                 )
 
-            strokes.append({
-                'points': points,
-                'w_start': w_start,
-                'w_end': w_end
-            })
+            strokes.append({"points": points, "w_start": w_start, "w_end": w_end})
+
+        # 按 P0 的 Y 坐标排序，使得 GT 顺序相对固定，减少匈牙利匹配的震荡
+        strokes.sort(key=lambda s: s["points"][0, 1])
 
         # 下采样
-        canvas = cv2.resize(canvas, (self.size, self.size), interpolation=cv2.INTER_AREA)
+        canvas = cv2.resize(
+            canvas, (self.size, self.size), interpolation=cv2.INTER_AREA
+        )
 
         return canvas, strokes
 
@@ -289,14 +304,11 @@ class IndependentStrokesDataset(Dataset):
         for i in range(self.max_strokes):
             if i < num_strokes:
                 stroke = strokes[i]
-                points = stroke['points'] / self.size  # 归一化到 [0, 1]
+                points = stroke["points"] / self.size  # 归一化到 [0, 1]
 
                 # P0, P1, P2, P3 的坐标
                 target[i, :8] = points.flatten()
-                target[i, 8:10] = [
-                    stroke['w_start'] / 10.0,
-                    stroke['w_end'] / 10.0
-                ]
+                target[i, 8:10] = [stroke["w_start"] / 10.0, stroke["w_end"] / 10.0]
                 target[i, 10] = 1.0  # 有效标志
             else:
                 target[i, 10] = 0.0  # 无效

@@ -16,6 +16,7 @@ class StrokeEncoder(nn.Module):
     这里的实现与 model.py 中的 StrokeEncoder 相同
     但为了更好的封装，我们直接导入
     """
+
     pass  # 实际从 model.py 导入
 
 
@@ -68,7 +69,7 @@ class VectorizationModel(nn.Module):
         self.detr_decoder = detr_decoder
         self.pixel_decoder = pixel_decoder  # 可选，用于计算重建损失
 
-    def forward(self, x, mode='vectorize'):
+    def forward(self, x, mode="vectorize"):
         """
         Args:
             x: [B, 1, 64, 64] 输入图像
@@ -79,19 +80,19 @@ class VectorizationModel(nn.Module):
         """
         embeddings = self.encoder(x)
 
-        if mode == 'vectorize':
+        if mode == "vectorize":
             # 只输出矢量
             strokes, validity = self.detr_decoder(embeddings)
             return strokes, validity, None
 
-        elif mode == 'reconstruct':
+        elif mode == "reconstruct":
             # 只输出重建（需要 pixel_decoder）
             if self.pixel_decoder is None:
                 raise ValueError("pixel_decoder is required for reconstruction mode")
             reconstructed = self.pixel_decoder(embeddings)
             return None, None, reconstructed
 
-        elif mode == 'both':
+        elif mode == "both":
             # 同时输出矢量和重建
             strokes, validity = self.detr_decoder(embeddings)
             reconstructed = None
@@ -139,7 +140,7 @@ class ModelFactory:
     """
 
     @staticmethod
-    def create_reconstruction_model(embed_dim=128, device='cpu'):
+    def create_reconstruction_model(embed_dim=128, device="cpu"):
         """
         创建重建模型
 
@@ -150,11 +151,7 @@ class ModelFactory:
         from pixel_decoder import PixelDecoder
 
         encoder = StrokeEncoder(
-            in_channels=1,
-            embed_dim=embed_dim,
-            num_heads=4,
-            num_layers=6,
-            dropout=0.1
+            in_channels=1, embed_dim=embed_dim, num_heads=4, num_layers=6, dropout=0.1
         ).to(device)
 
         pixel_decoder = PixelDecoder(embed_dim=embed_dim).to(device)
@@ -162,8 +159,9 @@ class ModelFactory:
         return ReconstructionModel(encoder, pixel_decoder)
 
     @staticmethod
-    def create_vectorization_model(embed_dim=128, num_slots=8, device='cpu',
-                                  include_pixel_decoder=True):
+    def create_vectorization_model(
+        embed_dim=128, num_slots=8, device="cpu", include_pixel_decoder=True
+    ):
         """
         创建矢量化模型
 
@@ -178,11 +176,7 @@ class ModelFactory:
         from detr_decoder import DETRVectorDecoder
 
         encoder = StrokeEncoder(
-            in_channels=1,
-            embed_dim=embed_dim,
-            num_heads=4,
-            num_layers=6,
-            dropout=0.1
+            in_channels=1, embed_dim=embed_dim, num_heads=4, num_layers=6, dropout=0.1
         ).to(device)
 
         detr_decoder = DETRVectorDecoder(
@@ -190,7 +184,8 @@ class ModelFactory:
             num_slots=num_slots,
             num_layers=3,
             num_heads=4,
-            dropout=0.1
+            dropout=0.1,
+            num_refine_steps=2,  # 迭代优化次数
         ).to(device)
 
         pixel_decoder = None
@@ -200,7 +195,7 @@ class ModelFactory:
         return VectorizationModel(encoder, detr_decoder, pixel_decoder)
 
     @staticmethod
-    def load_reconstruction_model(checkpoint_path, device='cpu'):
+    def load_reconstruction_model(checkpoint_path, device="cpu"):
         """
         加载重建模型
 
@@ -217,8 +212,8 @@ class ModelFactory:
         ).to(device)
         pixel_decoder = PixelDecoder(embed_dim=128).to(device)
 
-        encoder.load_state_dict(checkpoint['encoder_state_dict'])
-        pixel_decoder.load_state_dict(checkpoint['decoder_state_dict'])
+        encoder.load_state_dict(checkpoint["encoder_state_dict"])
+        pixel_decoder.load_state_dict(checkpoint["decoder_state_dict"])
 
         encoder.eval()
         pixel_decoder.eval()
@@ -226,8 +221,9 @@ class ModelFactory:
         return ReconstructionModel(encoder, pixel_decoder)
 
     @staticmethod
-    def load_vectorization_model(checkpoint_path, device='cpu',
-                                  include_pixel_decoder=True):
+    def load_vectorization_model(
+        checkpoint_path, device="cpu", include_pixel_decoder=True
+    ):
         """
         加载矢量化模型
 
@@ -243,18 +239,25 @@ class ModelFactory:
         encoder = StrokeEncoder(
             in_channels=1, embed_dim=128, num_heads=4, num_layers=6, dropout=0.1
         ).to(device)
+
+        # 使用更新后的架构参数
         detr_decoder = DETRVectorDecoder(
-            embed_dim=128, num_slots=8, num_layers=3, num_heads=4, dropout=0.1
+            embed_dim=128,
+            num_slots=8,
+            num_layers=3,
+            num_heads=4,
+            dropout=0.1,
+            num_refine_steps=2,
         ).to(device)
 
-        encoder.load_state_dict(checkpoint['encoder_state_dict'])
-        detr_decoder.load_state_dict(checkpoint['detr_decoder_state_dict'])
+        encoder.load_state_dict(checkpoint["encoder_state_dict"])
+        detr_decoder.load_state_dict(checkpoint["detr_decoder_state_dict"])
 
         # 尝试加载 pixel_decoder（如果存在）
         pixel_decoder = None
-        if include_pixel_decoder and 'pixel_decoder_state_dict' in checkpoint:
+        if include_pixel_decoder and "pixel_decoder_state_dict" in checkpoint:
             pixel_decoder = PixelDecoder(embed_dim=128).to(device)
-            pixel_decoder.load_state_dict(checkpoint['pixel_decoder_state_dict'])
+            pixel_decoder.load_state_dict(checkpoint["pixel_decoder_state_dict"])
             pixel_decoder.eval()
 
         encoder.eval()
@@ -271,25 +274,27 @@ class ModelFactory:
         """
         if isinstance(model, ReconstructionModel):
             checkpoint = {
-                'epoch': epoch,
-                'encoder_state_dict': model.encoder.state_dict(),
-                'decoder_state_dict': model.pixel_decoder.state_dict(),
-                'loss': loss,
+                "epoch": epoch,
+                "encoder_state_dict": model.encoder.state_dict(),
+                "decoder_state_dict": model.pixel_decoder.state_dict(),
+                "loss": loss,
             }
             if optimizer is not None:
-                checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+                checkpoint["optimizer_state_dict"] = optimizer.state_dict()
 
         elif isinstance(model, VectorizationModel):
             checkpoint = {
-                'epoch': epoch,
-                'encoder_state_dict': model.encoder.state_dict(),
-                'detr_decoder_state_dict': model.detr_decoder.state_dict(),
-                'loss': loss,
+                "epoch": epoch,
+                "encoder_state_dict": model.encoder.state_dict(),
+                "detr_decoder_state_dict": model.detr_decoder.state_dict(),
+                "loss": loss,
             }
             if model.pixel_decoder is not None:
-                checkpoint['pixel_decoder_state_dict'] = model.pixel_decoder.state_dict()
+                checkpoint["pixel_decoder_state_dict"] = (
+                    model.pixel_decoder.state_dict()
+                )
             if optimizer is not None:
-                checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+                checkpoint["optimizer_state_dict"] = optimizer.state_dict()
 
         else:
             raise ValueError(f"Unknown model type: {type(model)}")

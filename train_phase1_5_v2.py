@@ -17,26 +17,32 @@ def train_phase1_5():
     """Phase 1.5 训练"""
 
     config = {
-        'dataset_size': 20000,
-        'max_strokes': 8,
-        'batch_size': 32,
-        'num_epochs': 30,
-        'lr': 5e-4,
+        "dataset_size": 20000,
+        "max_strokes": 8,
+        "batch_size": 32,
+        "num_epochs": 30,
+        "lr": 5e-4,
     }
 
-    device = 'xpu'
+    if torch.cuda.is_available():
+        device = "cuda"
+        torch.backends.cudnn.benchmark = True
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = "xpu"
+    else:
+        device = "cpu"
     print(f"使用设备: {device}")
 
     # 加载 Phase 1 模型
     print("\n加载 Phase 1 模型...")
-    checkpoint = torch.load('best_reconstruction.pth', map_location=device)
+    checkpoint = torch.load("best_reconstruction.pth", map_location=device)
 
     # 使用工厂类创建模型
     model = ModelFactory.create_reconstruction_model(device=device)
 
     # 加载权重
-    model.encoder.load_state_dict(checkpoint['encoder_state_dict'])
-    model.pixel_decoder.load_state_dict(checkpoint['decoder_state_dict'])
+    model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
+    model.pixel_decoder.load_state_dict(checkpoint["decoder_state_dict"])
 
     print(f"  Epoch: {checkpoint['epoch']}")
     print(f"  Loss: {checkpoint['loss']:.6f}")
@@ -47,16 +53,11 @@ def train_phase1_5():
     # 创建数据集
     print("\n创建多曲线数据集...")
     dataset = MultiStrokeReconstructionDataset(
-        size=64,
-        length=config['dataset_size'],
-        max_strokes=config['max_strokes']
+        size=64, length=config["dataset_size"], max_strokes=config["max_strokes"]
     )
 
     train_loader = DataLoader(
-        dataset,
-        batch_size=config['batch_size'],
-        shuffle=True,
-        num_workers=4
+        dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4
     )
 
     print(f"  数据集大小: {len(dataset)}")
@@ -64,17 +65,19 @@ def train_phase1_5():
 
     # 损失和优化器
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config['lr'])
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['num_epochs'])
+    optimizer = optim.Adam(model.parameters(), lr=config["lr"])
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config["num_epochs"]
+    )
 
     # 训练
     print("\n" + "=" * 60)
     print("Phase 1.5: 多曲线重建训练")
     print("=" * 60)
 
-    best_loss = float('inf')
+    best_loss = float("inf")
 
-    for epoch in range(1, config['num_epochs'] + 1):
+    for epoch in range(1, config["num_epochs"] + 1):
         model.train()
 
         epoch_loss = 0.0
@@ -95,7 +98,9 @@ def train_phase1_5():
             epoch_loss += loss.item()
 
             if (batch_idx + 1) % 100 == 0:
-                print(f"  Batch [{batch_idx+1}/{len(train_loader)}], Loss: {loss.item():.6f}")
+                print(
+                    f"  Batch [{batch_idx + 1}/{len(train_loader)}], Loss: {loss.item():.6f}"
+                )
 
         scheduler.step()
 
@@ -104,8 +109,9 @@ def train_phase1_5():
         if avg_loss < best_loss:
             best_loss = avg_loss
             # 使用工厂类保存
-            ModelFactory.save_model(model, 'best_reconstruction_multi.pth',
-                                  epoch, best_loss, optimizer)
+            ModelFactory.save_model(
+                model, "best_reconstruction_multi.pth", epoch, best_loss, optimizer
+            )
             print(f"  ✓ 保存最佳模型")
 
         print(f"\nEpoch {epoch}/{config['num_epochs']}")
@@ -134,7 +140,7 @@ def visualize_reconstruction(model, dataset, device, num_samples=4):
     model.eval()
 
     fig, axes = plt.subplots(2, num_samples, figsize=(12, 6))
-    fig.suptitle('Multi-Stroke Reconstruction (Phase 1.5)', fontsize=16)
+    fig.suptitle("Multi-Stroke Reconstruction (Phase 1.5)", fontsize=16)
 
     with torch.no_grad():
         for i in range(num_samples):
@@ -149,20 +155,20 @@ def visualize_reconstruction(model, dataset, device, num_samples=4):
             recon_img = reconstructed.cpu().squeeze().numpy() * 255
 
             # 原图
-            axes[0, i].imshow(img, cmap='gray', vmin=0, vmax=255)
-            axes[0, i].set_title(f'Original #{i+1}')
-            axes[0, i].axis('off')
+            axes[0, i].imshow(img, cmap="gray", vmin=0, vmax=255)
+            axes[0, i].set_title(f"Original #{i + 1}")
+            axes[0, i].axis("off")
 
             # 重建图
-            axes[1, i].imshow(recon_img, cmap='gray', vmin=0, vmax=255)
-            axes[1, i].set_title(f'Reconstructed')
-            axes[1, i].axis('off')
+            axes[1, i].imshow(recon_img, cmap="gray", vmin=0, vmax=255)
+            axes[1, i].set_title(f"Reconstructed")
+            axes[1, i].axis("off")
 
     plt.tight_layout()
-    plt.savefig('reconstruction_multi_comparison.png', dpi=150, bbox_inches='tight')
+    plt.savefig("reconstruction_multi_comparison.png", dpi=150, bbox_inches="tight")
     print("  ✓ 保存图像: reconstruction_multi_comparison.png")
     plt.show()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     train_phase1_5()
