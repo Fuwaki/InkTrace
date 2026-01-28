@@ -42,6 +42,7 @@ from losses import DETRLoss
 
 # ==================== 可视化辅助函数 ====================
 
+
 def draw_bezier(ax, p0, p1, p2, p3, width=1.0, color="red", linestyle="-"):
     """绘制三次贝塞尔曲线 (从 visualize_detr.py 简化)"""
     t = np.linspace(0, 1, 30)
@@ -65,6 +66,7 @@ def draw_bezier(ax, p0, p1, p2, p3, width=1.0, color="red", linestyle="-"):
         alpha=0.8,
     )
 
+
 def visualize_sample(ax, img_np, prediction=None, target=None, title=""):
     """
     Args:
@@ -72,65 +74,84 @@ def visualize_sample(ax, img_np, prediction=None, target=None, title=""):
         target: [max_strokes, 11]
     """
     ax.imshow(img_np, cmap="gray", vmin=0, vmax=255, alpha=0.3)
-    
+
     # 绘制 Target (虚线)
     if target is not None:
         strokes = target[:, :10]
         classes = target[:, 10]
         for i in range(len(strokes)):
-            if classes[i].item() < 0.5: continue
+            if classes[i].item() < 0.5:
+                continue
             s = strokes[i]
-            draw_bezier(ax, s[0:2], s[2:4], s[4:6], s[6:8], width=1.5, color="orange", linestyle="--")
+            draw_bezier(
+                ax,
+                s[0:2],
+                s[2:4],
+                s[4:6],
+                s[6:8],
+                width=1.5,
+                color="orange",
+                linestyle="--",
+            )
 
     # 绘制 Prediction (实线)
     if prediction is not None:
         pred_strokes, pred_logits = prediction
         # pred_strokes: [K, 10], pred_logits: [K, 3]
-        pred_classes = pred_logits.argmax(dim=-1) # [K]
-        
+        pred_classes = pred_logits.argmax(dim=-1)  # [K]
+
         for i in range(len(pred_strokes)):
             cls = pred_classes[i].item()
-            if cls == 0: continue # Padding/Null
-            
+            if cls == 0:
+                continue  # Padding/Null
+
             s = pred_strokes[i]
-            color = "green" if cls == 1 else "cyan" # New=Green, Cont=Cyan
+            color = "green" if cls == 1 else "cyan"  # New=Green, Cont=Cyan
             width = 1.5
-            
+
             # 如果是 New 笔画，绘制起点
             if cls == 1:
-                ax.scatter(s[0]*64, s[1]*64, c='red', s=10, zorder=10)
-                
+                ax.scatter(s[0] * 64, s[1] * 64, c="red", s=10, zorder=10)
+
             draw_bezier(ax, s[0:2], s[2:4], s[4:6], s[6:8], width=width, color=color)
 
     ax.set_title(title, fontsize=8)
     ax.axis("off")
 
-def log_tensorboard_visualization(writer, global_step, imgs, targets, outputs, num_samples=4):
+
+def log_tensorboard_visualization(
+    writer, global_step, imgs, targets, outputs, num_samples=4
+):
     """记录可视化结果到 TensorBoard"""
-    if writer is None: return
-    
+    if writer is None:
+        return
+
     model_out_strokes = outputs[0] if isinstance(outputs, tuple) else outputs
     # outputs[1] 是 pen_logits: [B, K, 3]
-    model_out_logits = outputs[1] if isinstance(outputs, tuple) and len(outputs) > 1 else None
-    
-    if model_out_logits is None: return # 无法可视化
-    
+    model_out_logits = (
+        outputs[1] if isinstance(outputs, tuple) and len(outputs) > 1 else None
+    )
+
+    if model_out_logits is None:
+        return  # 无法可视化
+
     fig, axes = plt.subplots(1, num_samples, figsize=(4 * num_samples, 4))
-    if num_samples == 1: axes = [axes]
-    
+    if num_samples == 1:
+        axes = [axes]
+
     # 转 CPU
     imgs_cpu = imgs.detach().cpu()
     targets_cpu = targets.detach().cpu()
     pred_strokes_cpu = model_out_strokes.detach().cpu()
     pred_logits_cpu = model_out_logits.detach().cpu()
-    
+
     for i in range(min(num_samples, len(imgs))):
         img = imgs_cpu[i].squeeze().numpy() * 255
         tgt = targets_cpu[i]
         pred = (pred_strokes_cpu[i], pred_logits_cpu[i])
-        
+
         visualize_sample(axes[i], img, prediction=pred, target=tgt, title=f"Sample {i}")
-        
+
     plt.tight_layout()
     writer.add_figure("Prediction/val", fig, global_step)
     plt.close(fig)
@@ -390,7 +411,7 @@ def train_epoch(
 
         # 混合数据集可能导致 targets 形状不一致
         # 需要确保 targets 是 [B, 8, 11]
-        
+
         optimizer.zero_grad()
 
         # 前向传播
@@ -427,24 +448,26 @@ def train_epoch(
                 f"Class: {loss_dict.get('class', 0):.4f} "
                 f"Coord: {loss_dict.get('coord', 0):.4f}"
             )
-            
+
             # TensorBoard (移到这里或每N步写一次)
             if writer:
                 global_step = (epoch - 1) * len(dataloader) + batch_idx
                 writer.add_scalar("Loss/batch", current_loss, global_step)
                 for k, v in loss_dict.items():
                     writer.add_scalar(f"LossComponent/{k}", v, global_step)
-                
+
                 # 可视化 (每 5 个 log interval 或者是刚开始时，避免画图太频繁阻塞训练)
                 # 例如 log_interval=50，则每 250 batch 画一次
-                if (batch_idx + 1) % (args.log_interval * 5) == 0 or (batch_idx < args.log_interval):
+                if (batch_idx + 1) % (args.log_interval * 5) == 0 or (
+                    batch_idx < args.log_interval
+                ):
                     log_tensorboard_visualization(
                         writer, global_step, imgs, targets, outputs, num_samples=4
                     )
-                
+
                 # 强制刷新，确保用户能立即看到
                 writer.flush()
-        
+
         # 为了更平滑的曲线，也可以选择每 10 步写一次 TB，但不打印
         elif writer and (batch_idx + 1) % 10 == 0:
             global_step = (epoch - 1) * len(dataloader) + batch_idx
