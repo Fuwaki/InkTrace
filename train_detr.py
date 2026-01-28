@@ -154,10 +154,20 @@ def log_tensorboard_visualization(
     targets_cpu = targets.detach().cpu()
     pred_strokes_cpu = model_out_strokes.detach().cpu()
     pred_logits_cpu = model_out_logits.detach().cpu()
+    pred_probs_cpu = torch.softmax(pred_logits_cpu, dim=-1)  # 计算概率
+
+    # 打印第一个样本的概率分布，供 Debug
+    print(f"\n[Viz Debug] Sample 0 Probabilities (Step {global_step}):")
+    for k in range(min(8, len(pred_probs_cpu[0]))):
+        p = pred_probs_cpu[0][k]
+        print(
+            f"  Slot {k}: Null={p[0]:.2f}, New={p[1]:.2f}, Cont={p[2]:.2f} -> {p.argmax().item()}"
+        )
 
     for i in range(min(num_samples, len(imgs))):
         img = imgs_cpu[i].squeeze().numpy() * 255
         tgt = targets_cpu[i]
+        # 传递概率用于更精细的过滤 (虽然 visualize_sample 目前只用了 argmax，但可以在这里扩展)
         pred = (pred_strokes_cpu[i], pred_logits_cpu[i])
 
         visualize_sample(axes[i], img, prediction=pred, target=tgt, title=f"Sample {i}")
@@ -586,7 +596,9 @@ def train(args):
         )
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scheduler = optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda, last_epoch=start_epoch - 1
+    )
 
     # Tensorboard
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
