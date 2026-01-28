@@ -40,6 +40,102 @@ from datasets import InkTraceDataset
 from losses import DETRLoss
 
 
+# ==================== 可视化辅助函数 ====================
+
+def draw_bezier(ax, p0, p1, p2, p3, width=1.0, color="red", linestyle="-"):
+    """绘制三次贝塞尔曲线 (从 visualize_detr.py 简化)"""
+    t = np.linspace(0, 1, 30)
+    # De Casteljau Algorithm
+    # Layer 1
+    q0 = (1 - t)[:, None] * p0 + t[:, None] * p1
+    q1 = (1 - t)[:, None] * p1 + t[:, None] * p2
+    q2 = (1 - t)[:, None] * p2 + t[:, None] * p3
+    # Layer 2
+    r0 = (1 - t)[:, None] * q0 + t[:, None] * q1
+    r1 = (1 - t)[:, None] * q1 + t[:, None] * q2
+    # Layer 3 (Final)
+    curve = (1 - t)[:, None] * r0 + t[:, None] * r1
+
+    ax.plot(
+        curve[:, 0] * 64,
+        curve[:, 1] * 64,
+        color=color,
+        linewidth=width,
+        linestyle=linestyle,
+        alpha=0.8,
+    )
+
+def visualize_sample(ax, img_np, prediction=None, target=None, title=""):
+    """
+    Args:
+        prediction: [num_slots, 10] strokes + [num_slots, 3] pen_logits
+        target: [max_strokes, 11]
+    """
+    ax.imshow(img_np, cmap="gray", vmin=0, vmax=255, alpha=0.3)
+    
+    # 绘制 Target (虚线)
+    if target is not None:
+        strokes = target[:, :10]
+        classes = target[:, 10]
+        for i in range(len(strokes)):
+            if classes[i].item() < 0.5: continue
+            s = strokes[i]
+            draw_bezier(ax, s[0:2], s[2:4], s[4:6], s[6:8], width=1.5, color="orange", linestyle="--")
+
+    # 绘制 Prediction (实线)
+    if prediction is not None:
+        pred_strokes, pred_logits = prediction
+        # pred_strokes: [K, 10], pred_logits: [K, 3]
+        pred_classes = pred_logits.argmax(dim=-1) # [K]
+        
+        for i in range(len(pred_strokes)):
+            cls = pred_classes[i].item()
+            if cls == 0: continue # Padding/Null
+            
+            s = pred_strokes[i]
+            color = "green" if cls == 1 else "cyan" # New=Green, Cont=Cyan
+            width = 1.5
+            
+            # 如果是 New 笔画，绘制起点
+            if cls == 1:
+                ax.scatter(s[0]*64, s[1]*64, c='red', s=10, zorder=10)
+                
+            draw_bezier(ax, s[0:2], s[2:4], s[4:6], s[6:8], width=width, color=color)
+
+    ax.set_title(title, fontsize=8)
+    ax.axis("off")
+
+def log_tensorboard_visualization(writer, global_step, imgs, targets, outputs, num_samples=4):
+    """记录可视化结果到 TensorBoard"""
+    if writer is None: return
+    
+    model_out_strokes = outputs[0] if isinstance(outputs, tuple) else outputs
+    # outputs[1] 是 pen_logits: [B, K, 3]
+    model_out_logits = outputs[1] if isinstance(outputs, tuple) and len(outputs) > 1 else None
+    
+    if model_out_logits is None: return # 无法可视化
+    
+    fig, axes = plt.subplots(1, num_samples, figsize=(4 * num_samples, 4))
+    if num_samples == 1: axes = [axes]
+    
+    # 转 CPU
+    imgs_cpu = imgs.detach().cpu()
+    targets_cpu = targets.detach().cpu()
+    pred_strokes_cpu = model_out_strokes.detach().cpu()
+    pred_logits_cpu = model_out_logits.detach().cpu()
+    
+    for i in range(min(num_samples, len(imgs))):
+        img = imgs_cpu[i].squeeze().numpy() * 255
+        tgt = targets_cpu[i]
+        pred = (pred_strokes_cpu[i], pred_logits_cpu[i])
+        
+        visualize_sample(axes[i], img, prediction=pred, target=tgt, title=f"Sample {i}")
+        
+    plt.tight_layout()
+    writer.add_figure("Prediction/val", fig, global_step)
+    plt.close(fig)
+
+
 # ==================== 配置定义 ====================
 
 PHASE_CONFIGS = {
@@ -338,6 +434,14 @@ def train_epoch(
                 writer.add_scalar("Loss/batch", current_loss, global_step)
                 for k, v in loss_dict.items():
                     writer.add_scalar(f"LossComponent/{k}", v, global_step)
+                
+                # 可视化 (每 5 个 log interval 或者是刚开始时，避免画图太频繁阻塞训练)
+                # 例如 log_interval=50，则每 250 batch 画一次
+                if (batch_idx + 1) % (args.log_interval * 5) == 0 or (batch_idx < args.log_interval):
+                    log_tensorboard_visualization(
+                        writer, global_step, imgs, targets, outputs, num_samples=4
+                    )
+                
                 # 强制刷新，确保用户能立即看到
                 writer.flush()
         
