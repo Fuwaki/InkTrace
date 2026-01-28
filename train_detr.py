@@ -579,8 +579,8 @@ def train(args):
             rest_params.append(p)
 
     param_dicts = [
-        {"params": encoder_params, "lr": lr * 0.1},
-        {"params": rest_params, "lr": lr},
+        {"params": encoder_params, "lr": lr * 0.1, "initial_lr": lr * 0.1},
+        {"params": rest_params, "lr": lr, "initial_lr": lr},
     ]
 
     optimizer = optim.AdamW(param_dicts, weight_decay=1e-4)
