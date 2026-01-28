@@ -21,7 +21,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import PathPatch, Circle
-from matplotlib.path import Path
+from matplotlib.path import Path as MplPath
 from torch.utils.data import DataLoader
 
 from models import ModelFactory
@@ -85,8 +85,8 @@ def draw_bezier(ax, p0, p1, p2, p3, width, color="red", alpha=0.8, linestyle="-"
         (p2[0] * 64, p2[1] * 64),
         (p3[0] * 64, p3[1] * 64),
     ]
-    codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]
-    path = Path(verts, codes)
+    codes = [MplPath.MOVETO, MplPath.CURVE4, MplPath.CURVE4, MplPath.CURVE4]
+    path = MplPath(verts, codes)
     patch = PathPatch(
         path,
         facecolor="none",

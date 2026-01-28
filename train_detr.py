@@ -545,7 +545,12 @@ def train(args):
             if "encoder_state_dict" in ckpt:
                 model.encoder.load_state_dict(ckpt["encoder_state_dict"])
             start_epoch = ckpt.get("epoch", 0) + 1
-            best_loss = ckpt.get("loss", float("inf"))
+            # best_loss = ckpt.get("loss", float("inf"))
+            # 跨阶段训练时，旧的 loss 没有参考价值，反而阻碍保存
+            # 我们统一重置 best_loss，这样新阶段的第一个 epoch 就会被记录
+            print(f"  Old Best Loss: {ckpt.get('loss', 'N/A')}")
+            best_loss = float("inf")
+            print("  (提示: 已重置 best_loss 为 inf 以适应新阶段训练)")
         else:
             print(f"  ⚠ 检查点不存在: {args.resume}, 从头开始")
 
