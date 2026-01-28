@@ -45,6 +45,16 @@ from losses import DETRLoss
 
 def draw_bezier(ax, p0, p1, p2, p3, width=1.0, color="red", linestyle="-"):
     """绘制三次贝塞尔曲线 (从 visualize_detr.py 简化)"""
+    # Fix: 确保输入是 numpy，避免 Tensor * numpy 报错
+    if isinstance(p0, torch.Tensor):
+        p0 = p0.detach().cpu().numpy()
+    if isinstance(p1, torch.Tensor):
+        p1 = p1.detach().cpu().numpy()
+    if isinstance(p2, torch.Tensor):
+        p2 = p2.detach().cpu().numpy()
+    if isinstance(p3, torch.Tensor):
+        p3 = p3.detach().cpu().numpy()
+
     t = np.linspace(0, 1, 30)
     # De Casteljau Algorithm
     # Layer 1
