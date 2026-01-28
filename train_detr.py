@@ -406,26 +406,28 @@ def train(args):
     ).to(device)
 
     # 优化器 (分层 LR)
-    # Encoder 已经是预训练的，LR 设小一点
-    # Decoder 需要大一点 LR
+    # 策略：
+    # 1. 收集 Encoder 参数 (LR * 0.1)
+    # 2. 收集其余所有参数 (Decoder, PixelDecoder, Adapter 等) (LR)
+
+    encoder_params = []
+    encoder_param_ids = set()
+
+    for n, p in model.encoder.named_parameters():
+        if p.requires_grad:
+            encoder_params.append(p)
+            encoder_param_ids.add(id(p))
+
+    rest_params = []
+    for n, p in model.named_parameters():
+        if p.requires_grad and id(p) not in encoder_param_ids:
+            rest_params.append(p)
+
     param_dicts = [
-        {
-            "params": [
-                p
-                for n, p in model.named_parameters()
-                if "encoder" in n and p.requires_grad
-            ],
-            "lr": lr * 0.1,
-        },
-        {
-            "params": [
-                p
-                for n, p in model.named_parameters()
-                if "decoder" in n and p.requires_grad
-            ],
-            "lr": lr,
-        },
+        {"params": encoder_params, "lr": lr * 0.1},
+        {"params": rest_params, "lr": lr},
     ]
+
     optimizer = optim.AdamW(param_dicts, weight_decay=1e-4)
 
     # Scheduler
