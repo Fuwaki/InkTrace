@@ -659,13 +659,23 @@ def train(args):
         print("\n生成可视化...")
         vis_path = f"reconstruction_phase{args.phase}.png"
         # 创建新的数据集用于可视化 (避免迭代器耗尽问题)
-        vis_dataset = InkTraceDataset(
-            mode=phase_config["mode"],
-            img_size=64,
-            batch_size=16,
-            epoch_length=100,
-            **phase_config["dataset_params"],
-        )
+        vis_mode = phase_config["mode"]
+        if vis_mode == "mixed":
+            from datasets import MixedInkTraceDataset
+
+            vis_dataset = MixedInkTraceDataset(
+                configs=phase_config["dataset_params"]["configs"],
+                epoch_length=100,
+                batch_size=16,
+            )
+        else:
+            vis_dataset = InkTraceDataset(
+                mode=vis_mode,
+                img_size=64,
+                batch_size=16,
+                epoch_length=100,
+                **phase_config["dataset_params"],
+            )
         visualize_reconstruction(model, vis_dataset, device, vis_path)
 
     return model

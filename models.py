@@ -69,36 +69,43 @@ class VectorizationModel(nn.Module):
         self.detr_decoder = detr_decoder
         self.pixel_decoder = pixel_decoder  # 可选，用于计算重建损失
 
-    def forward(self, x, mode="vectorize"):
+    def forward(self, x, mode="vectorize", return_aux=True):
         """
         Args:
             x: [B, 1, 64, 64] 输入图像
             mode: 'vectorize' | 'reconstruct' | 'both'
+            return_aux: 是否返回 auxiliary outputs (用于辅助损失)
 
         Returns:
             根据 mode 返回不同的结果
+            - vectorize: (strokes, pen_state_logits, aux_outputs) 或 (strokes, pen_state_logits)
+            - reconstruct: reconstructed
+            - both: dict with all outputs
         """
         embeddings = self.encoder(x)
 
         if mode == "vectorize":
             # 只输出矢量
-            strokes, validity = self.detr_decoder(embeddings)
-            return strokes, validity, None
+            # DETRVectorDecoder V3 返回: (strokes, pen_state_logits, aux_outputs) 或 (strokes, pen_state_logits)
+            return self.detr_decoder(embeddings, return_aux=return_aux)
 
         elif mode == "reconstruct":
             # 只输出重建（需要 pixel_decoder）
             if self.pixel_decoder is None:
                 raise ValueError("pixel_decoder is required for reconstruction mode")
             reconstructed = self.pixel_decoder(embeddings)
-            return None, None, reconstructed
+            return reconstructed
 
         elif mode == "both":
             # 同时输出矢量和重建
-            strokes, validity = self.detr_decoder(embeddings)
+            detr_outputs = self.detr_decoder(embeddings, return_aux=return_aux)
             reconstructed = None
             if self.pixel_decoder is not None:
                 reconstructed = self.pixel_decoder(embeddings)
-            return strokes, validity, reconstructed
+            return {
+                "detr_outputs": detr_outputs,
+                "reconstructed": reconstructed,
+            }
 
         else:
             raise ValueError(f"Unknown mode: {mode}")

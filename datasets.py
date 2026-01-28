@@ -14,6 +14,14 @@ class InkTraceDataset(IterableDataset):
     2. 'independent': 多条独立贝塞尔曲线 (Set Prediction 任务)
     3. 'continuous': 连续多段贝塞尔曲线 (序列生成任务)
     4. 'multi_connected': 多条路径，每条路径包含多段曲线 (复杂文档布局模拟)
+
+    Label 格式说明 (V3):
+    - single: [10] -> 纯坐标+宽度 (保持原样，train_encoder 兼容)
+    - independent: [max_strokes, 11] -> 最后一维是 pen_state (0=Pad, 1=New, 2=Continue)
+    - continuous: [max_segments, 11] -> 同上，第一笔 New，后续 Continue
+    - multi_connected: [max_paths, max_segments, 11] -> 同上 (保持原形状)
+
+    当 for_detr=True 时，会自动修正 pen_state 标签为 New/Continue。
     """
 
     def __init__(
@@ -29,6 +37,7 @@ class InkTraceDataset(IterableDataset):
         max_segments=None,  # mode='continuous' or 'multi_connected'
         seed=None,
         rust_threads=None,  # 手动指定 Rust 内部线程数 (None=自动策略)
+        for_detr=False,  # 是否为 DETR 训练准备数据 (修正 pen_state)
     ):
         """
         参数:
@@ -36,12 +45,13 @@ class InkTraceDataset(IterableDataset):
             img_size (int): 图像尺寸 (WxH)
             batch_size (int): Rust 内部生成时的批次大小。
             epoch_length (int): 虚拟 epoch 长度。
+            for_detr (bool): 是否为 DETR 训练格式化标签 (设置 New/Continue)
 
             rust_threads (int):
                 控制 Rust (Rayon) 并行线程数。
                 - None (默认): 自动策略。
                     - 主进程模式 (num_workers=0): 不限制，使用所有 CPU 核心。
-                    -多进程模式 (num_workers>0): 限制为 1 线程，利用进程级并行。
+                    - 多进程模式 (num_workers>0): 限制为 1 线程，利用进程级并行。
                 - Int > 0: 强制指定每个进程/Worker 内的 Rust 线程数。
                   (例如机器核心数很多，worker 数较少时，可以设为 >1)
         """
@@ -55,6 +65,7 @@ class InkTraceDataset(IterableDataset):
         self.max_paths = max_paths
         self.max_segments = max_segments
         self.rust_threads = rust_threads
+        self.for_detr = for_detr
 
         # 参数校验
         self._validate_params()
@@ -101,18 +112,10 @@ class InkTraceDataset(IterableDataset):
         worker_info = torch.utils.data.get_worker_info()
 
         # 配置 Rayon 线程数
-        # 策略：
-        # 1. 只有当 worker_info 存在（即处于 DataLoader Worker 子进程中）且 rust_threads 未手动指定时，
-        #    才强制设为 1，防止 CPU 过载。
-        # 2. 如果 rust_threads 有值，则无条件执行设置。
-        # 3. 如果在主进程 (num_workers=0) 且 rust_threads=None，则不限制（Rayon 默认全核）。
-
         target_threads = None
-
         if self.rust_threads is not None:
             target_threads = self.rust_threads
         elif worker_info is not None:
-            # 多进程默认策略：防止争抢
             target_threads = 1
 
         if target_threads is not None:
@@ -120,21 +123,15 @@ class InkTraceDataset(IterableDataset):
                 if hasattr(ink_trace_rs, "set_rayon_threads"):
                     ink_trace_rs.set_rayon_threads(target_threads)
             except RuntimeError:
-                # Rayon 全局线程池只能初始化一次，后续调用会报错，忽略即可
                 pass
 
         if worker_info is None:
-            # 单进程
             total_items = self.epoch_length
         else:
-            # 多进程：将总长度均分给每个 worker
             per_worker = int(
                 math.ceil(self.epoch_length / float(worker_info.num_workers))
             )
             total_items = per_worker
-
-            # 可以在这里根据 worker_id 设置不同的 Rust 种子（如果 Rust 接口支持）
-            # 目前 Rust 使用 thread_rng，本身就是线程安全的且各不相同
 
         generated_count = 0
 
@@ -155,12 +152,80 @@ class InkTraceDataset(IterableDataset):
 
                 # numpy -> tensor
                 # 增加 Channel 维度: [H, W] -> [1, H, W]
-                # 注意：Rust 返回的是 float32 且已归一化到 0-1
                 img_tensor = torch.from_numpy(imgs[i]).unsqueeze(0)
-                label_tensor = torch.from_numpy(labels[i])
+
+                # 处理 Label
+                raw_label = labels[i]  # numpy array
+
+                # 保持原始形状，只在 for_detr=True 时修正 pen_state
+                if self.for_detr:
+                    raw_label = self._process_label_for_detr(raw_label)
+
+                label_tensor = torch.from_numpy(raw_label.copy())
 
                 yield img_tensor, label_tensor
                 generated_count += 1
+
+    def _process_label_for_detr(self, raw_label):
+        """
+        为 DETR 训练修正 pen_state 标签
+
+        pen_state 语义:
+        - 0: Padding/Null (无效)
+        - 1: New (新笔画起点)
+        - 2: Continue (延续上一笔)
+
+        Args:
+            raw_label: numpy array，形状取决于 mode
+
+        Returns:
+            修正后的 numpy array (原地修改的副本)
+        """
+        if self.mode == "single":
+            # single 模式：[10] 没有 pen_state 维度
+            # 不做修改，保持原样
+            return raw_label
+
+        elif self.mode == "independent":
+            # [max_strokes, 11]
+            # 独立笔画全部是 New (1.0)
+            # Rust 端设置 valid=1.0，这里直接使用即可
+            # pen_state 语义：0=Pad, 1=New
+            return raw_label
+
+        elif self.mode == "continuous":
+            # [max_segments, 11]
+            # 连续笔画：第一笔 New，后续 Continue
+            # Rust 端所有 valid 都设为 1.0，需要修正为 New/Continue
+            label = raw_label.copy()
+            first_found = False
+            for k in range(len(label)):
+                if label[k, 10] > 0.5:  # 有效笔画
+                    if not first_found:
+                        label[k, 10] = 1.0  # New
+                        first_found = True
+                    else:
+                        label[k, 10] = 2.0  # Continue
+            return label
+
+        elif self.mode == "multi_connected":
+            # [max_paths, max_segments, 11]
+            # 每条路径：第一笔 New，后续 Continue
+            label = raw_label.copy()
+            num_paths, num_segs, _ = label.shape
+
+            for p in range(num_paths):
+                first_found = False
+                for s in range(num_segs):
+                    if label[p, s, 10] > 0.5:  # 有效笔画
+                        if not first_found:
+                            label[p, s, 10] = 1.0  # New
+                            first_found = True
+                        else:
+                            label[p, s, 10] = 2.0  # Continue
+            return label
+        else:
+            return raw_label
 
     def __len__(self):
         return self.epoch_length
@@ -174,21 +239,33 @@ class MixedInkTraceDataset(IterableDataset):
     实现方式：
     内部根据配置实例化多个 InkTraceDataset 的生成逻辑，
     在迭代时随机选择一种模式生成一个 Batch。
+
+    注意：混合模式下，不同模式的 label 形状可能不同。
+    建议只混合 label 形状兼容的模式 (如 independent 和 continuous)。
     """
 
-    def __init__(self, configs, epoch_length=10000, batch_size=64, rust_threads=None):
+    def __init__(
+        self,
+        configs,
+        epoch_length=10000,
+        batch_size=64,
+        rust_threads=None,
+        for_detr=False,
+    ):
         """
         Args:
             configs: 列表，每个元素为 (kwargs_dict, probability)
             epoch_length: epoch 长度
             batch_size: batch 大小
             rust_threads: Rayon 线程数设置 (透传给子 Dataset)
+            for_detr: 是否为 DETR 训练格式化标签
         """
         super().__init__()
         self.configs = configs
         self.epoch_length = epoch_length
         self.batch_size = batch_size
         self.rust_threads = rust_threads
+        self.for_detr = for_detr
 
         # 预先根据配置创建多个 dataset 实例（仅用于借用它们的生成逻辑）
         self.datasets = []
@@ -196,9 +273,11 @@ class MixedInkTraceDataset(IterableDataset):
 
         for kwargs, prob in configs:
             # 强制与其共享 batch_size，便于管理
+            kwargs = kwargs.copy()  # 避免修改原始配置
             kwargs["batch_size"] = self.batch_size
             kwargs["epoch_length"] = self.epoch_length
-            kwargs["rust_threads"] = self.rust_threads  # 统一透传
+            kwargs["rust_threads"] = self.rust_threads
+            kwargs["for_detr"] = self.for_detr  # 透传
 
             ds = InkTraceDataset(**kwargs)
             self.datasets.append(ds)
@@ -238,7 +317,6 @@ class MixedInkTraceDataset(IterableDataset):
 
         while generated_count < total_items:
             # 随机选择一个 Dataset 模式
-            # np.random.choice 不支持对象数组，所以用索引
             dataset_idx = np.random.choice(len(self.datasets), p=self.probs)
             chosen_dataset = self.datasets[dataset_idx]
 
@@ -251,11 +329,14 @@ class MixedInkTraceDataset(IterableDataset):
                     break
 
                 img_tensor = torch.from_numpy(imgs[i]).unsqueeze(0)
-                label_tensor = torch.from_numpy(labels[i])
 
-                # 警告：不同模式的 label 形状可能不一致。
-                # 如果混合使用，请确保你的 collate_fn 能处理不同形状的 label，
-                # 或者只混合 label 形状兼容的模式。
+                # 处理 Label (如果开启 for_detr)
+                raw_label = labels[i]
+                if self.for_detr:
+                    raw_label = chosen_dataset._process_label_for_detr(raw_label)
+
+                label_tensor = torch.from_numpy(raw_label.copy())
+
                 yield img_tensor, label_tensor
                 generated_count += 1
 
