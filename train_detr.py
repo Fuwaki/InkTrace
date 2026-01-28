@@ -150,7 +150,7 @@ def parse_args():
 
     # 系统参数
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--rust-threads", type=int, default=None)
     parser.add_argument("--log-dir", type=str, default="runs_detr")
     parser.add_argument("--log-interval", type=int, default=50)
@@ -288,55 +288,63 @@ def train_epoch(
     num_batches = 0
 
     for batch_idx, (imgs, targets) in enumerate(dataloader):
-        imgs = imgs.to(device)
-        targets = targets.to(device)
+        # 使用 non_blocking=True 加速数据传输
+        imgs = imgs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
 
         # 混合数据集可能导致 targets 形状不一致
         # 需要确保 targets 是 [B, 8, 11]
-        # 如果 datasets.py 返回的 targets 最后一维不一致或缺少 class，需要在这里适配
-        # 假设 Rust 端已经更新返回 [..., 11] (0-7:coords, 8-9:width, 10:class)
-        # Class: 1=New, 2=Continue, 0=Padding
-
+        
         optimizer.zero_grad()
 
         # 前向传播
-        # Model returns: strokes, pen_state_logits, aux_outputs
-        # V3 Decoder always returns aux if enabled
         outputs = model(imgs, mode="vectorize")
 
-        # 这里的 outputs 可能是 (strokes, valid) V2 格式
-        # 或者是 (strokes, pen_logits, aux) V3 格式
-        # Loss function 会处理解包
-
-        # 计算 Loss
+        # 计算 Loss (Hungarian Matcher 在 CPU 上运行，这是主要瓶颈)
         loss, loss_dict = criterion(outputs, targets)
 
         # 反向传播
         loss.backward()
 
-        # 梯度裁剪 (关键！)
+        # 梯度裁剪
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
         optimizer.step()
 
-        epoch_loss += loss.item()
+        # 累积统计 (注意: loss.item() 会触发同步，但对于打印日志是必须的)
+        current_loss = loss.item()
+        epoch_loss += current_loss
         num_batches += 1
 
-        # 累积 loss_dict
         for k, v in loss_dict.items():
             epoch_loss_dict[k] = epoch_loss_dict.get(k, 0.0) + v
 
-        # Logging
+        # Logging & TensorBoard
+        # 将 TensorBoard 写入与打印日志同步，或降低频率，避免频繁 I/O 阻塞高速训练
+        # train_encoder 虽然每步都写，但因为计算量极小所以不明显。DETR 建议适当降低频率。
         if (batch_idx + 1) % args.log_interval == 0:
+            # Print
             print(
-                f"  Batch [{batch_idx + 1}/{len(dataloader)}] Loss: {loss.item():.4f} "
-                f"Class: {loss_dict.get('class', 0):.4f} Coord: {loss_dict.get('coord', 0):.4f}"
+                f"  Batch [{batch_idx + 1}/{len(dataloader)}] "
+                f"Loss: {current_loss:.4f} "
+                f"Class: {loss_dict.get('class', 0):.4f} "
+                f"Coord: {loss_dict.get('coord', 0):.4f}"
             )
-
-        if writer:
+            
+            # TensorBoard (移到这里或每N步写一次)
+            if writer:
+                global_step = (epoch - 1) * len(dataloader) + batch_idx
+                writer.add_scalar("Loss/batch", current_loss, global_step)
+                for k, v in loss_dict.items():
+                    writer.add_scalar(f"LossComponent/{k}", v, global_step)
+                # 强制刷新，确保用户能立即看到
+                writer.flush()
+        
+        # 为了更平滑的曲线，也可以选择每 10 步写一次 TB，但不打印
+        elif writer and (batch_idx + 1) % 10 == 0:
             global_step = (epoch - 1) * len(dataloader) + batch_idx
-            writer.add_scalar("Loss/batch", loss.item(), global_step)
+            writer.add_scalar("Loss/batch", current_loss, global_step)
             for k, v in loss_dict.items():
                 writer.add_scalar(f"LossComponent/{k}", v, global_step)
 
