@@ -45,9 +45,28 @@ def train(args):
     print(f"Dataset initialized. Stage: {args.stage}, Workers: {args.num_workers}")
 
     # 2. Model
-    model = ModelFactory.create_dense_model(
-        embed_dim=128, device=device, encoder_ckpt=args.encoder_ckpt
-    )
+    start_epoch = 0
+    best_loss = float("inf")
+
+    if args.resume:
+        # Resume: 加载完整模型 (encoder + decoder + heads)
+        print(f"Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+
+        model = ModelFactory.create_dense_model(embed_dim=128, device=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+        if "epoch" in checkpoint:
+            start_epoch = checkpoint["epoch"] + 1
+            print(f"  Resuming from epoch {start_epoch}")
+        if "loss" in checkpoint:
+            best_loss = checkpoint["loss"]
+            print(f"  Previous best loss: {best_loss:.4f}")
+    else:
+        # 从头开始，可选加载 encoder 预训练权重
+        model = ModelFactory.create_dense_model(
+            embed_dim=128, device=device, encoder_ckpt=args.encoder_ckpt
+        )
 
     # Freeze Encoder if requested
     if args.freeze_encoder:
@@ -65,9 +84,13 @@ def train(args):
     )
 
     # IterableDataset doesn't have accurate len, compute steps manually
-    steps_per_epoch = args.epoch_length // args.batch_size
+    # Use ceil division to account for the last partial batch
+    steps_per_epoch = (args.epoch_length + args.batch_size - 1) // args.batch_size
+    # Add a small buffer to avoid "Tried to step X times" error if DataLoader yields extra
+    total_steps = steps_per_epoch * args.epochs + 100
+
     scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=args.lr, steps_per_epoch=steps_per_epoch, epochs=args.epochs
+        optimizer, max_lr=args.lr, total_steps=total_steps
     )
 
     # 4. Training Loop
@@ -91,13 +114,13 @@ def train(args):
     - stage: {args.stage}
     - freeze_encoder: {args.freeze_encoder}
     - encoder_ckpt: {args.encoder_ckpt}
+    - resume: {args.resume}
     """,
     )
 
-    best_loss = float("inf")
     global_step = 0
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         if args.freeze_encoder:
             model.encoder.eval()  # Keep encoder in eval mode
@@ -133,10 +156,10 @@ def train(args):
                 continue
 
             loss.backward()
-            
+
             # Gradient clipping to prevent explosion
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
+
             optimizer.step()
             scheduler.step()
 
@@ -250,6 +273,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--freeze_encoder", action="store_true", help="Freeze encoder weights"
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume training (loads full model)",
     )
     parser.add_argument(
         "--vis_interval", type=int, default=2, help="Visualization interval (epochs)"

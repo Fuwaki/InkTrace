@@ -43,7 +43,7 @@ class DenseLoss(nn.Module):
         target = target.float()
         # Convert probability to logits: logit = log(p / (1-p))
         logits = torch.log(pred / (1 - pred))
-        return F.binary_cross_entropy_with_logits(logits, target, reduction='mean')
+        return F.binary_cross_entropy_with_logits(logits, target, reduction="mean")
 
     def forward(self, outputs, targets):
         """
