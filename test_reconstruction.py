@@ -13,6 +13,9 @@ import matplotlib.patches as patches
 from matplotlib.collections import LineCollection
 import torch
 from torch.utils.data import DataLoader
+import argparse
+from PIL import Image
+import torchvision.transforms.functional as TF
 
 # Import model and dataset
 from encoder import StrokeEncoder
@@ -374,33 +377,165 @@ def test_multiple_samples(model, dataset, device, output_dir, num_samples=4):
         print(f"  Average curves per sample: {total_curves / len(all_results):.1f}")
 
 
+def test_custom_image(
+    model, image_path, device, output_dir, img_size=64, invert=False, threshold=0.2
+):
+    """测试单张自定义图片"""
+    if not os.path.exists(image_path):
+        print(f"Error: Image not found at {image_path}")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    filename = os.path.basename(image_path)
+    name, ext = os.path.splitext(filename)
+
+    print(f"\n=== Testing custom image: {filename} ===")
+
+    # Load image
+    try:
+        pil_img = Image.open(image_path).convert("L")  # Gray scale
+        print(f"  Loaded image size: {pil_img.size}")
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return
+
+    # Resize
+    if pil_img.size != (img_size, img_size):
+        print(f"  Resizing to {img_size}x{img_size}")
+        pil_img = pil_img.resize((img_size, img_size), Image.Resampling.BILINEAR)
+
+    # To Tensor and Normalize
+    img_tensor = TF.to_tensor(pil_img)  # [1, H, W], range [0, 1]
+
+    if invert:
+        print("  Inverting image colors")
+        img_tensor = 1.0 - img_tensor
+
+    img_tensor_dev = img_tensor.to(device)
+    input_tensor = img_tensor_dev.unsqueeze(0)  # [1, 1, H, W]
+
+    # Model inference
+    model.eval()
+    with torch.no_grad():
+        outputs = model(input_tensor)
+
+    # Process outputs
+    pred_maps = {}
+    for key in ["skeleton", "junction", "tangent", "width", "offset"]:
+        if key in outputs:
+            data = outputs[key][0].cpu().numpy()
+            if data.ndim == 3 and data.shape[0] == 1:
+                data = data.squeeze(0)
+            pred_maps[key] = data
+
+    # Reconstruction
+    print("  Running reconstruction...")
+    reconstructor = SimpleGraphReconstructor(
+        config={
+            "skeleton_threshold": threshold,
+            "junction_threshold": 0.5,
+            "min_stroke_length": 5,
+            "use_thinning": True,
+            "cross_junctions": True,
+        }
+    )
+
+    strokes = reconstructor.process(pred_maps)
+    bezier_curves = fit_bezier_curves(strokes, tolerance=3.0)
+    print(f"  Generated {len(bezier_curves)} curves")
+
+    # Visualize
+    img_np = (
+        img_tensor.squeeze(0).squeeze(0).numpy()
+    )  # Use CPU tensor for visualization
+    save_path = os.path.join(output_dir, f"reconstruction_{name}.png")
+
+    visualize_reconstruction(img_np, pred_maps, bezier_curves, save_path, strokes, None)
+
+    return bezier_curves
+
+
 def main():
+    parser = argparse.ArgumentParser(
+        description="Test Graph Reconstruction on InkTrace model"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="best_dense_model.pth",
+        help="Path to model checkpoint",
+    )
+    parser.add_argument(
+        "--image", type=str, default=None, help="Path to custom image file (optional)"
+    )
+    parser.add_argument(
+        "--output", type=str, default="results_reconstruction", help="Output directory"
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=4,
+        help="Number of random samples if no image provided",
+    )
+    parser.add_argument(
+        "--size", type=int, default=64, help="Input image size for resizing"
+    )
+    parser.add_argument(
+        "--invert",
+        action="store_true",
+        help="Invert image colors (for white background)",
+    )
+    parser.add_argument(
+        "--threshold", type=float, default=0.2, help="Skeleton threshold"
+    )
+    parser.add_argument("--no-cuda", action="store_true", help="Disable CUDA")
+
+    args = parser.parse_args()
+
     # Configuration
-    checkpoint_path = "best_dense_model.pth"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    output_dir = "results_reconstruction"
-    num_samples = 4
+    checkpoint_path = args.checkpoint
+    output_dir = args.output
+
+    use_cuda = not args.no_cuda and torch.cuda.is_available()
+    device = "cuda" if use_cuda else "cpu"
 
     print(f"Using device: {device}")
 
     # Load model
-    model, ckpt = load_model(checkpoint_path, device)
+    try:
+        model, ckpt = load_model(checkpoint_path, device)
+    except FileNotFoundError:
+        print(f"Checkpoint not found: {checkpoint_path}")
+        return
 
-    # Create dataset
-    print("\nCreating dataset...")
-    dataset = DenseInkTraceDataset(
-        mode="independent",
-        img_size=64,
-        batch_size=1,
-        epoch_length=num_samples,
-        curriculum_stage=2,  # Medium difficulty
-    )
+    if args.image:
+        # Test custom image
+        test_custom_image(
+            model,
+            args.image,
+            device,
+            output_dir,
+            img_size=args.size,
+            invert=args.invert,
+            threshold=args.threshold,
+        )
+    else:
+        # Test random samples from dataset
+        num_samples = args.num_samples
+        print("\nCreating dataset...")
+        dataset = DenseInkTraceDataset(
+            mode="independent",
+            img_size=args.size,
+            batch_size=1,
+            epoch_length=num_samples,
+            curriculum_stage=2,  # Medium difficulty
+        )
 
-    print(f"  Dataset size: {len(dataset)}")
-    print(f"  Max strokes: {dataset.max_strokes}")
+        print(f"  Dataset size: {len(dataset)}")
+        print(f"  Max strokes: {dataset.max_strokes}")
 
-    # Test
-    test_multiple_samples(model, dataset, device, output_dir, num_samples)
+        # Test
+        test_multiple_samples(model, dataset, device, output_dir, num_samples)
 
     print(f"\nDone! Results saved to {output_dir}/")
 
