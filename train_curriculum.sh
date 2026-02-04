@@ -26,7 +26,7 @@ GPU_ID=${2:-0}
 START_PHASE=${1:-1}
 
 # Training hyperparameters (based on your 5090 48GB config)
-BATCH_SIZE=128         # Your tested config
+BATCH_SIZE=256         # Your tested config
 EPOCH_LENGTH=50000     # Samples per epoch
 NUM_WORKERS=8
 RUST_THREADS=8

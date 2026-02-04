@@ -103,7 +103,8 @@ def train(args):
     steps_per_epoch = (args.epoch_length + args.batch_size - 1) // args.batch_size
     # Calculate remaining steps if resuming
     remaining_epochs = args.epochs - start_epoch
-    total_steps = steps_per_epoch * remaining_epochs + 100
+    # Add buffer to avoid "Tried to step X times" error if dataloader yields extra batches
+    total_steps = int(steps_per_epoch * remaining_epochs * 1.05) + 500
 
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps
