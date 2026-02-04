@@ -48,9 +48,13 @@ def train(args):
     start_epoch = 0
     best_loss = float("inf")
 
+    # 区分两种加载方式:
+    # --resume: 完全恢复中断的训练 (epoch + optimizer + scheduler)
+    # --init_from: 加载模型权重，从头开始新 stage 训练
+
     if args.resume:
-        # Resume: 加载完整模型 (encoder + decoder + heads)
-        print(f"Resuming from checkpoint: {args.resume}")
+        # 完全恢复: 用于训练中断后继续
+        print(f"Resuming interrupted training from: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
 
         model = ModelFactory.create_dense_model(embed_dim=128, device=device)
@@ -58,10 +62,21 @@ def train(args):
 
         if "epoch" in checkpoint:
             start_epoch = checkpoint["epoch"] + 1
-            print(f"  Resuming from epoch {start_epoch}")
+            print(f"  Continuing from epoch {start_epoch}")
         if "loss" in checkpoint:
             best_loss = checkpoint["loss"]
             print(f"  Previous best loss: {best_loss:.4f}")
+
+    elif args.init_from:
+        # 跨 Stage 继续: 加载上一阶段模型，从 epoch 0 开始新训练
+        print(f"Initializing from previous stage: {args.init_from}")
+        checkpoint = torch.load(args.init_from, map_location=device)
+
+        model = ModelFactory.create_dense_model(embed_dim=128, device=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"  Loaded model weights (starting fresh training)")
+        # start_epoch = 0, best_loss = inf (重置)
+
     else:
         # 从头开始，可选加载 encoder 预训练权重
         model = ModelFactory.create_dense_model(
@@ -86,12 +101,21 @@ def train(args):
     # IterableDataset doesn't have accurate len, compute steps manually
     # Use ceil division to account for the last partial batch
     steps_per_epoch = (args.epoch_length + args.batch_size - 1) // args.batch_size
-    # Add a small buffer to avoid "Tried to step X times" error if DataLoader yields extra
-    total_steps = steps_per_epoch * args.epochs + 100
+    # Calculate remaining steps if resuming
+    remaining_epochs = args.epochs - start_epoch
+    total_steps = steps_per_epoch * remaining_epochs + 100
 
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps
     )
+
+    # Restore optimizer/scheduler state if fully resuming
+    if args.resume and "optimizer_state_dict" in checkpoint:
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            print("  Restored optimizer state")
+        except:
+            print("  Warning: Could not restore optimizer state")
 
     # 4. Training Loop
     os.makedirs(args.save_dir, exist_ok=True)
@@ -278,7 +302,13 @@ if __name__ == "__main__":
         "--resume",
         type=str,
         default=None,
-        help="Path to checkpoint to resume training (loads full model)",
+        help="Resume interrupted training (restores epoch, optimizer)",
+    )
+    parser.add_argument(
+        "--init_from",
+        type=str,
+        default=None,
+        help="Initialize from previous stage checkpoint (fresh training)",
     )
     parser.add_argument(
         "--vis_interval", type=int, default=2, help="Visualization interval (epochs)"
