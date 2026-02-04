@@ -7,7 +7,7 @@ class DenseLoss(nn.Module):
     """
     Multi-task loss for InkTrace V4
     L = L_skel + L_junc + L_tan + L_width + L_offset
-    
+
     Note: Uses clamp to avoid numerical issues with BCE under AMP (autocast).
     """
 

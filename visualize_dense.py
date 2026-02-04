@@ -52,11 +52,11 @@ def visualize_prediction(img, pred, target, save_path, idx=0):
         idx: sample index (for logging)
     """
     # Detach and CPU
-    # Squeeze channel dim if present: [1, H, W] -> [H, W]
-    if img.dim() == 3:
-        img_np = img[0].cpu().numpy()  # [H, W]
-    else:
-        img_np = img.cpu().numpy()  # Already [H, W]
+    # Handle various input shapes: [1, 1, H, W], [1, H, W], [H, W]
+    img_cpu = img.cpu()
+    while img_cpu.dim() > 2:
+        img_cpu = img_cpu.squeeze(0)
+    img_np = img_cpu.numpy()  # [H, W]
 
     # Skeleton
     pred_skel = pred["skeleton"][0, 0].cpu().numpy()
