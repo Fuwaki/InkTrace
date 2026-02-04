@@ -22,7 +22,8 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
 from encoder import StrokeEncoder
-from pixel_decoder import PixelDecoder, ReconstructionModel
+from decoder import PixelDecoder
+from models import ReconstructionModel
 from datasets import InkTraceDataset
 
 # ==================== 配置定义 ====================
@@ -166,7 +167,7 @@ def load_model(checkpoint_path, device):
                 "checkpoint 缺少 decoder_state_dict / pixel_decoder_state_dict"
             )
 
-        msg2 = model.decoder.load_state_dict(decoder_state, strict=True)
+        msg2 = model.pixel_decoder.load_state_dict(decoder_state, strict=True)
         assert not msg2.missing_keys and not msg2.unexpected_keys
 
         model.eval()

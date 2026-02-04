@@ -1,5 +1,4 @@
 import numpy as np
-import cv2
 
 
 def generate_dense_maps(strokes, img_size=64):

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class DenseLoss(nn.Module):
     """
     Multi-task loss for InkTrace V4
@@ -75,7 +76,7 @@ class DenseLoss(nn.Module):
         l1_width = torch.abs(pred_width - tgt_width)
         l1_width = (l1_width * mask).sum() / num_fg
         losses["loss_width"] = self.weights["width"] * l1_width
-        
+
         # 5. Offset Loss (L1)
         pred_off = outputs["offset"]
         tgt_off = targets["offset"]

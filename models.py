@@ -86,10 +86,16 @@ class ModelFactory:
     """
 
     @staticmethod
-    def create_reconstruction_model(embed_dim=128, num_heads=4, num_layers=6, device="cpu"):
+    def create_reconstruction_model(
+        embed_dim=128, num_heads=4, num_layers=6, device="cpu"
+    ):
         """创建 Reconstruction Model (Phase 1)"""
         encoder = StrokeEncoder(
-            in_channels=1, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, dropout=0.1
+            in_channels=1,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout=0.1,
         )
         pixel_decoder = PixelDecoder(embed_dim=embed_dim)
         model = ReconstructionModel(encoder, pixel_decoder).to(device)
@@ -99,7 +105,7 @@ class ModelFactory:
     def create_dense_model(embed_dim=128, device="cpu", encoder_ckpt=None):
         """创建 Dense Vector Model (Phase V4)"""
         encoder = StrokeEncoder(in_channels=1, embed_dim=embed_dim)
-        
+
         # Load Pretrained Encoder if path provided
         if encoder_ckpt:
             print(f"Loading pretrained encoder from {encoder_ckpt}")
@@ -114,7 +120,7 @@ class ModelFactory:
                 }
             else:
                 state_dict = ckpt
-            
+
             # Load roughly
             encoder.load_state_dict(state_dict, strict=False)
             print("Encoder weights loaded.")
@@ -126,32 +132,32 @@ class ModelFactory:
     def load_reconstruction_model(checkpoint_path, device="cpu"):
         """加载重建模型"""
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        
+
         # Assuming embed_dim=128 for now, ideally save config in checkpoint
         model = ModelFactory.create_reconstruction_model(embed_dim=128, device=device)
-        
+
         model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
         if "decoder_state_dict" in checkpoint:
             model.pixel_decoder.load_state_dict(checkpoint["decoder_state_dict"])
         elif "pixel_decoder_state_dict" in checkpoint:
             model.pixel_decoder.load_state_dict(checkpoint["pixel_decoder_state_dict"])
-            
+
         return model
 
     @staticmethod
     def load_dense_model(checkpoint_path, device="cpu"):
         """加载 Dense Model"""
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        
+
         # Assuming embed_dim=128
         model = ModelFactory.create_dense_model(embed_dim=128, device=device)
-        
+
         if "model_state_dict" in checkpoint:
             model.load_state_dict(checkpoint["model_state_dict"])
         else:
             # Fallback for separate keys if saved differently
             if "encoder_state_dict" in checkpoint:
                 model.encoder.load_state_dict(checkpoint["encoder_state_dict"])
-             # ... handle decoder loading if split
-        
+            # ... handle decoder loading if split
+
         return model

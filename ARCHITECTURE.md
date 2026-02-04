@@ -209,8 +209,8 @@ $$L = \lambda_1 L_{skel} + \lambda_2 L_{junc} + \lambda_3 L_{tan} + \lambda_4 L_
 *   [x] 扩展 Rust 渲染器，支持输出 Skeleton Map, Junction Map, Tangent Map 等 Buffer。
 
 ### Step 2: 模型搭建 (Python Side)
-*   [ ] 实现 `DenseVectorNet` (Encoder + U-Net Decoder + Heads)。
-*   [ ] 定义多任务 Loss 函数。
+*   [x] 实现 `DenseVectorModel` (Encoder + U-Net Decoder + Heads)。
+*   [x] 定义多任务 Loss 函数。
 
 ### Step 3: 训练验证
 *   [ ] 跑通单个 Batch 的过拟合。

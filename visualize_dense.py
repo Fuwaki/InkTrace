@@ -3,7 +3,7 @@
 Dense Prediction 模型可视化与评估工具
 
 功能：
-1. 从 checkpoint 加载 DenseVectorNet 模型
+1. 从 checkpoint 加载 DenseVectorModel 模型
 2. 在测试数据上可视化预测结果 (Skeleton, Junction, Tangent, Width, Offset)
 3. 计算评估指标 (IoU, Precision, Recall, F1)
 
@@ -30,7 +30,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from encoder import StrokeEncoder
-from dense_models import DenseVectorNet, DenseLoss
+from models import DenseVectorModel
 from datasets import DenseInkTraceDataset, collate_dense_batch
 
 
@@ -52,7 +52,11 @@ def visualize_prediction(img, pred, target, save_path, idx=0):
         idx: sample index (for logging)
     """
     # Detach and CPU
-    img_np = img[0].cpu().numpy()  # [H, W]
+    # Squeeze channel dim if present: [1, H, W] -> [H, W]
+    if img.dim() == 3:
+        img_np = img[0].cpu().numpy()  # [H, W]
+    else:
+        img_np = img.cpu().numpy()  # Already [H, W]
 
     # Skeleton
     pred_skel = pred["skeleton"][0, 0].cpu().numpy()
@@ -263,7 +267,7 @@ def compute_batch_metrics(model, dataloader, device, num_batches=10):
     Compute metrics over multiple batches.
 
     Args:
-        model: DenseVectorNet model
+        model: DenseVectorModel model
         dataloader: data loader
         device: torch device
         num_batches: number of batches to evaluate
@@ -303,14 +307,14 @@ def compute_batch_metrics(model, dataloader, device, num_batches=10):
 
 def load_dense_model(checkpoint_path, device="cpu"):
     """
-    Load DenseVectorNet model from checkpoint.
+    Load DenseVectorModel from checkpoint.
 
     Args:
         checkpoint_path: path to .pth file
         device: torch device
 
     Returns:
-        model: DenseVectorNet in eval mode
+        model: DenseVectorModel in eval mode
         checkpoint: raw checkpoint dict (for metadata)
     """
     if not os.path.exists(checkpoint_path):
@@ -336,7 +340,7 @@ def load_dense_model(checkpoint_path, device="cpu"):
 
     # Create model
     encoder = StrokeEncoder(in_channels=1, embed_dim=embed_dim)
-    model = DenseVectorNet(encoder).to(device)
+    model = DenseVectorModel(encoder).to(device)
 
     # Load weights
     if "model_state_dict" in checkpoint:

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from RepVit import Conv2d_BN
 
+
 class DenseHeads(nn.Module):
     """
     Collection of 5 Dense Prediction Heads

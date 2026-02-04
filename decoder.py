@@ -79,6 +79,7 @@ class PixelDecoder(nn.Module):
     输入: [B, 64, embed_dim] (来自 Encoder 的序列)
     输出: [B, 1, 64, 64] (重构图像)
     """
+
     def __init__(self, embed_dim=128):
         super().__init__()
 
@@ -91,31 +92,30 @@ class PixelDecoder(nn.Module):
         # 目标: 8 -> 16 -> 32 -> 64 (3次上采样)
 
         self.layer1 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear'), # 8 -> 16
+            nn.Upsample(scale_factor=2, mode="bilinear"),  # 8 -> 16
             nn.Conv2d(embed_dim, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
-            nn.GELU()
+            nn.GELU(),
         )
 
         self.layer2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear'), # 16 -> 32
+            nn.Upsample(scale_factor=2, mode="bilinear"),  # 16 -> 32
             nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
-            nn.GELU()
+            nn.GELU(),
         )
 
         self.layer3 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear'), # 32 -> 64
+            nn.Upsample(scale_factor=2, mode="bilinear"),  # 32 -> 64
             nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(16),
-            nn.GELU()
+            nn.GELU(),
         )
 
         # 3. 输出层 (Output Layer)
         # 最后一层把通道压缩为 1，并用 Sigmoid 归一化到 0-1
         self.head = nn.Sequential(
-            nn.Conv2d(16, 1, kernel_size=3, padding=1),
-            nn.Sigmoid()
+            nn.Conv2d(16, 1, kernel_size=3, padding=1), nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -124,16 +124,16 @@ class PixelDecoder(nn.Module):
         # Step 1: Reshape (序列 -> 图像)
         # [B, 64, embed_dim] -> [B, embed_dim, 64] -> [B, embed_dim, 8, 8]
         B, N, C = x.shape
-        H = W = int(N ** 0.5) # 根号64 = 8
+        H = W = int(N**0.5)  # 根号64 = 8
         x = x.transpose(1, 2).reshape(B, C, H, W)
 
         # Step 2: 逐级放大
-        x = self.layer1(x) # -> [B, 64, 16, 16]
-        x = self.layer2(x) # -> [B, 32, 32, 32]
-        x = self.layer3(x) # -> [B, 16, 64, 64]
+        x = self.layer1(x)  # -> [B, 64, 16, 16]
+        x = self.layer2(x)  # -> [B, 32, 32, 32]
+        x = self.layer3(x)  # -> [B, 16, 64, 64]
 
         # Step 3: 输出图像
-        img = self.head(x) # -> [B, 1, 64, 64]
+        img = self.head(x)  # -> [B, 1, 64, 64]
 
         return img
 
@@ -143,9 +143,10 @@ class DenseDecoder(nn.Module):
     Hybrid U-Net with Attention Gates for Dense Prediction Tasks.
     Takes multi-scale features from Encoder and progressively upsamples them.
     """
+
     def __init__(self, embed_dim=128):
         super().__init__()
-        
+
         # Feature channels from encoder (Modified StrokeEncoder)
         # f1: 32 (32x32)
         # f2: 128 (16x16)
@@ -202,26 +203,26 @@ class DenseDecoder(nn.Module):
         f3 = self.f3_proj(f3)
 
         # Block 1 (8 -> 16)
-        d1_up = self.up1(f3)      # [B, 128, 16, 16]
-        f2_gated = self.ag1(d1_up, f2) # [B, 128, 16, 16]
+        d1_up = self.up1(f3)  # [B, 128, 16, 16]
+        f2_gated = self.ag1(d1_up, f2)  # [B, 128, 16, 16]
         d1 = torch.cat([d1_up, f2_gated], dim=1)
-        d1 = self.conv1(d1)       # [B, 128, 16, 16]
+        d1 = self.conv1(d1)  # [B, 128, 16, 16]
 
         # Block 2 (16 -> 32)
-        d2_up = self.up2(d1)      # [B, 128, 32, 32]
-        f1_gated = self.ag2(d2_up, f1) # [B, 32, 32, 32]
+        d2_up = self.up2(d1)  # [B, 128, 32, 32]
+        f1_gated = self.ag2(d2_up, f1)  # [B, 32, 32, 32]
         d2 = torch.cat([d2_up, f1_gated], dim=1)
-        d2 = self.conv2(d2)       # [B, 64, 32, 32]
+        d2 = self.conv2(d2)  # [B, 64, 32, 32]
 
         # Block 3 (32 -> 64)
-        d3_up = self.up3(d2)      # [B, 64, 64, 64]
-        d3 = self.conv3(d3_up)    # [B, 64, 64, 64]
+        d3_up = self.up3(d2)  # [B, 64, 64, 64]
+        d3 = self.conv3(d3_up)  # [B, 64, 64, 64]
 
         aux_outputs = {}
         if self.training:
             ds1 = torch.sigmoid(self.ds1_head(d1))
             ds2 = torch.sigmoid(self.ds2_head(d2))
-            aux_outputs['aux_skeleton_16'] = ds1
-            aux_outputs['aux_skeleton_32'] = ds2
-            
+            aux_outputs["aux_skeleton_16"] = ds1
+            aux_outputs["aux_skeleton_32"] = ds2
+
         return d3, aux_outputs

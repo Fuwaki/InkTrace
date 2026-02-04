@@ -1,8 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
-import sys
-import os
 import cv2
 
 # Import from datasets (new API)

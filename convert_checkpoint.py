@@ -180,7 +180,7 @@ def verify_conversion(checkpoint_path: str) -> bool:
 
     try:
         from encoder import StrokeEncoder
-        from pixel_decoder import PixelDecoder
+        from decoder import PixelDecoder
 
         # 创建模型
         encoder = StrokeEncoder(in_channels=1, embed_dim=128)

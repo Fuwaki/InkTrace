@@ -11,7 +11,7 @@ import numpy as np
 import ink_trace_rs
 import math
 
-from dense_gen import generate_dense_maps, batch_generate_dense_maps
+from dense_gen import batch_generate_dense_maps
 
 
 class DenseInkTraceDataset(IterableDataset):
