@@ -30,18 +30,19 @@ def train(args):
         batch_size=args.batch_size,
         epoch_length=args.epoch_length,
         curriculum_stage=args.stage,
-        rust_threads=4,
+        rust_threads=args.rust_threads,
     )
 
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=args.num_workers,
         collate_fn=collate_dense_batch,
         pin_memory=True,
+        persistent_workers=args.num_workers > 0,
     )
 
-    print(f"Dataset initialized. Stage: {args.stage}")
+    print(f"Dataset initialized. Stage: {args.stage}, Workers: {args.num_workers}")
 
     # 2. Model
     model = ModelFactory.create_dense_model(
@@ -229,7 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--epoch_length", type=int, default=1000)
+    parser.add_argument("--epoch_length", type=int, default=10000)
     parser.add_argument("--stage", type=int, default=2)
     parser.add_argument("--save_dir", type=str, default="checkpoints_dense")
     parser.add_argument(
@@ -243,6 +244,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--vis_interval", type=int, default=2, help="Visualization interval (epochs)"
+    )
+    parser.add_argument(
+        "--num_workers", type=int, default=4, help="DataLoader num_workers"
+    )
+    parser.add_argument(
+        "--rust_threads", type=int, default=4, help="Rust data generation threads"
     )
 
     args = parser.parse_args()
