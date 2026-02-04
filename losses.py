@@ -7,6 +7,8 @@ class DenseLoss(nn.Module):
     """
     Multi-task loss for InkTrace V4
     L = L_skel + L_junc + L_tan + L_width + L_offset
+    
+    Note: Uses clamp to avoid numerical issues with BCE under AMP (autocast).
     """
 
     def __init__(self, weights=None):
@@ -30,6 +32,17 @@ class DenseLoss(nn.Module):
         )
         return loss.mean()
 
+    def _safe_bce(self, pred, target):
+        """
+        AMP-safe BCE loss.
+        Clamp predictions and compute BCE manually to avoid autocast issues.
+        """
+        # Clamp to avoid log(0)
+        pred = pred.clamp(min=1e-7, max=1 - 1e-7)
+        # Manual BCE: -[y*log(p) + (1-y)*log(1-p)]
+        bce = -(target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
+        return bce.mean()
+
     def forward(self, outputs, targets):
         """
         targets: dict of tensors
@@ -40,7 +53,7 @@ class DenseLoss(nn.Module):
         pred_skel = outputs["skeleton"]
         tgt_skel = targets["skeleton"]
 
-        bce_skel = F.binary_cross_entropy(pred_skel, tgt_skel)
+        bce_skel = self._safe_bce(pred_skel, tgt_skel)
         dice_skel = self._dice_loss(pred_skel, tgt_skel)
         losses["loss_skel"] = self.weights["skeleton"] * (bce_skel + dice_skel)
 
@@ -91,7 +104,7 @@ class DenseLoss(nn.Module):
             tgt_16 = (tgt_16 > 0.5).float()  # Binarize
 
             aux_pred = outputs["aux_skeleton_16"]
-            aux_loss = F.binary_cross_entropy(aux_pred, tgt_16)
+            aux_loss = self._safe_bce(aux_pred, tgt_16)
             losses["loss_aux_16"] = self.weights["aux"] * aux_loss
 
         if "aux_skeleton_32" in outputs:
@@ -100,7 +113,7 @@ class DenseLoss(nn.Module):
             tgt_32 = (tgt_32 > 0.5).float()
 
             aux_pred = outputs["aux_skeleton_32"]
-            aux_loss = F.binary_cross_entropy(aux_pred, tgt_32)
+            aux_loss = self._safe_bce(aux_pred, tgt_32)
             losses["loss_aux_32"] = self.weights["aux"] * aux_loss
 
         losses["total"] = sum(losses.values())
