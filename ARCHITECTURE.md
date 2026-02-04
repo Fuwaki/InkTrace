@@ -1,185 +1,182 @@
-# InkTrace V4 架构设计说明书：混合自回归矢量化 (Hybrid Autoregressive Vectorization)
+# InkTrace V4 架构设计说明书：密集预测与图重建 (Dense Prediction & Graph Reconstruction)
 
-**版本**: 1.1 (Refined)
+**版本**: 1.2 (Final Paradigm)
 **日期**: 2026-01-29
-**关键词**: 矢量化 (Vectorization), 贝塞尔曲线 (Bezier Curves), 自回归 (Autoregressive), 拓扑几何解耦, 物理连续性
+**关键词**: 密集预测 (Dense Prediction), 骨架提取 (Skeletonization), 图算法 (Graph Algorithms), 最小二乘拟合
 
 ---
 
-## 1. 项目背景与问题定义 (Project Context)
+## 1. 核心理念 (Core Philosophy)
 
-### 1.1 项目目标
-**InkTrace** 旨在构建一个像人类一样“看图写字”的矢量化引擎。
-*   **输入**: $64 \times 64$ 像素的灰度光栅图像 (Tile)。
-*   **输出**: 具有精确拓扑结构的 **三次贝塞尔曲线 (Cubic Bezier Curves)** 序列及其笔画宽度。
-*   **核心约束**: 必须保证跨 Tile 的线条 **$C^0$ 物理连续** (即上一块砖的终点必须严格等于下一块砖的起点)，杜绝传统矢量化算法中的断裂和错位问题。
+1.  **分而治之 (Divide and Conquer)**:
+    *   **神经网络**: 只负责“看”。将输入图像转化为像素级的语义特征图 (Skeleton, Junction, Tangent, etc.)。这是深度学习最擅长的任务。
+    *   **确定性算法**: 负责“建”。利用并查集、图搜索等经典算法构建拓扑；利用最小二乘法拟合几何曲线。这是传统算法最擅长的领域。
 
-### 1.2 现有痛点 (Why V4?)
-在之前的尝试 (Phase 2 DETR) 中，我们遇到了以下瓶颈：
-1.  **虚点预测难**: 神经网络难以预测位于画面外的贝塞尔控制点 ($P_1, P_2$)，导致大曲率线条拟合失败。
-2.  **拓扑断裂**: 并行预测无法保证 $P_{t, start} == P_{t-1, end}$，且 Tile 拼接处存在明显缝隙。
-3.  **计算资源**: 需在 Consumer GPU (RTX 5090) 及 CPU 上实现高并发处理，需避免沉重的全图 Attention。
+2.  **显式拓扑 (Explicit Topology)**:
+    *   放弃让模型通过 Attention 隐式学习拓扑。
+    *   显式地将图像转化为图结构 $G=(V, E)$，其中 $V$ 是 Junction，$E$ 是 Skeleton Chain。
 
----
-
-## 2. 核心设计哲学 (Core Philosophy)
-
-1.  **实点替代虚点 (On-Curve Points Supremacy)**: 
-    *   放弃直接预测抽象的控制点。改为预测曲线上 **真实的 4 个采样点** (Start, 1/3, 2/3, End)。
-    *   利用固定数学矩阵将实点瞬间转换为贝塞尔控制点。
-    *   *收益*: 将几何推理降维为视觉定位，解决“控制点溢出”问题。
-
-2.  **拓扑与几何解耦 (Topology-Geometry Decoupling)**:
-    *   **Stage 1 (Commander)**: 只负责“指挥”笔画走哪个网格 (16x16 Grid)。
-    *   **Stage 2 (Artist)**: 负责在选定网格内“描绘”精确坐标。
-    *   *收益*: 极短的序列长度 (~30 tokens) + 极高的几何精度。
-
-3.  **拼图即条件 (Stitching as Condition)**:
-    *   采用 **Zig-Zag 扫描**，将上一个 Tile 的断点作为 **Prompt (提示)** 喂给下一个 Tile。
-    *   *收益*: 以前置约束替代后处理拼接，物理保证连续性。
+3.  **确定性拟合 (Deterministic Fitting)**:
+    *   不让神经网络猜参数。
+    *   通过 Skeleton 获取有序像素点集，通过 Tangent Field 辅助排序，最后用数值方法精准拟合贝塞尔控制点。
 
 ---
 
-## 3. 整体架构 (System Architecture)
+## 2. 整体架构 (System Architecture)
 
-模型采用 **Boundary-Aware U-Net Encoder** + **Dual-Stage Decoder** 结构。
+模型采用 **Hybrid U-Net** 结构，包含 RepViT Backbone, Global Transformer Context 以及多尺度特征融合解码器。
 
-### 3.1 数据流图
+### 2.1 数据流图
 
 ```mermaid
 graph TD
-    Input[Tile Image 64x64] --> Encoder
-    Boundary[Boundary Context Seq] --> Encoder
+    Input[Tile Image 64x64] --> RepViT
     
-    subgraph "Encoder (Multi-Scale U-Net)"
-        Encoder --> F1[High Feat 32x32]
-        Encoder --> F2[Mid Feat 16x16]
-        Encoder --> F3[Low Feat 8x8]
-        F3 --> FPN[FPN Fusion]
-        F2 --> FPN
-        F1 --> FPN
+    subgraph "Encoder (Hybrid)"
+        RepViT[RepViT Backbone] --> F1[32x32 Feat]
+        RepViT --> F2[16x16 Feat]
+        RepViT --> F3[8x8 Feat]
+        
+        F3 --> Flatten[Flatten]
+        Flatten --> Trans[Transformer Encoder]
+        Trans --> Reshape[Reshape 8x8]
+        Reshape --> F3_Enhanced[Global Context Feat]
     end
     
-    FPN --> F_Low[Fused Low]
-    FPN --> F_Mid[Fused Mid]
-    FPN --> F_High[Fused High]
-    
-    subgraph "Stage 1: Commander (Topology)"
-        direction TB
-        BoundTok[Boundary Tokens] --> GPT
-        F_Low --> GPT[AR Transformer]
-        F_Mid --> GPT
+    subgraph "Decoder (U-Net Style)"
+        F3_Enhanced --> Up1[Upsample]
+        Up1 -- Concat --> Fusion1[Fusion with F2]
+        Fusion1 --> Up2[Upsample]
+        Up2 -- Concat --> Fusion2[Fusion with F1]
+        Fusion2 --> Up3[Upsample]
+        Up3 --> FinalFeat[64x64 High-Res Feat]
     end
     
-    GPT --> GridSeq[Grid/Action Sequence]
-    
-    subgraph "Stage 2: Artist (Geometry)"
-        GridSeq --> MLP[Parallel MLP]
-        F_High --> MLP
-        MLP --> OnCurve[On-Curve Points]
-        MLP --> Widths[Widths]
+    subgraph "Prediction Heads (Dense)"
+        FinalFeat --> H1[Skeleton Map]
+        FinalFeat --> H2[Junction Map]
+        FinalFeat --> H3[Tangent Field]
+        FinalFeat --> H4[Width Map]
+        FinalFeat --> H5[Offset Map]
     end
     
-    subgraph "Math Layer"
-        OnCurve --> Matrix[Fixed Matrix M^-1]
-        Matrix --> Bezier[Bezier Controls P0-P3]
+    subgraph "CPU/Rust Post-Processing"
+        H1 & H2 & H3 & H4 & H5 --> GraphAlgo[Graph Building & Tracing]
+        GraphAlgo --> PixelChain[Ordered Pixel Chains]
+        PixelChain --> LeastSquares[Least Squares Fitting]
+        LeastSquares --> Bezier[Bezier Curves P0-P3]
     end
-    
-    Bezier --> Output[Vector Output]
 ```
 
 ---
 
-## 4. 详细模块设计 (Module Design)
+## 3. 详细模块设计 (Module Design)
 
-### 4.1 模块 A: Boundary-Aware Multi-Scale Encoder
+### 3.1 Encoder: Global Context Enhanced RepViT
 
-**功能**: 提取多尺度特征，并强力注入边界条件。
+**功能**: 提取多尺度特征，并通过 Transformer 增强全局感受野。
 
-*   **输入**:
-    *   Image: `[B, 1, 64, 64]` (训练时建议 Pad 到 72x72 以提供 Context)
-    *   Boundary Prompts: `[B, N, 3]`。列表包含所有从相邻 Tile 传入的断点 $(x, y)$ 及进入向量 $(vx, vy)$。
-*   **结构**:
-    *   **U-Net Backbone**: 复用 Phase 1 RepViT 权重。
-    *   **Boundary Encoder**: 一个小型 MLP 将 Prompt 编码为 Token 序列。
-    *   **Scale Fusion**: 使用 FPN (Feature Pyramid Network) 融合 32x32, 16x16, 8x8 特征。
-    *   **Injection**: 在 FPN 融合前，通过 Cross-Attention 将 Boundary Tokens 注入到底层特征 (`F_Low`) 中。
+*   **Input**: `[B, 1, 64, 64]`
+*   **Backbone**: Phase 1 RepViT (复用权重)。
+*   **Context Module**:
+    *   Input: `[B, 64, 128]` (8x8 flattened)
+    *   Block: 2-4 layers Transformer Encoder
+    *   Output: `[B, 64, 128]` (Reshape back to 8x8)
+    *   *目的*: 让局部特征感知全局拓扑，哪怕在 64x64 的小图上也很重要。
 
-### 4.2 模块 B: Topology Commander (Stage 1)
+### 3.2 Decoder: Detail-Preserving U-Net
 
-**功能**: 决策中心。确定笔顺、结构和连接关系。
+**功能**: 逐步恢复分辨率，精确到像素级。
 
-*   **架构**: Causal Transformer Decoder (GPT-style)。
-*   **词表设计 (Vocabulary)**:
-    *   `Grid_ID` (0-255): 对应 16x16 网格位置。
-    *   `PEN_LIFT` (特殊的 Action): 表示当前笔画结束，抬笔。
-    *   `EOS`: 表示当前 Tile 所有内容绘制完毕。
-    *   `SOS`: 起始符 (通常由 Boundary Token 充当)。
-*   **工作流**:
-    1.  接收 Boundary Token 作为 Prompt。
-    2.  自回归生成: `[Grid_45, Grid_46, Grid_62, PEN_LIFT, Grid_10, ..., EOS]`。
-    3.  此阶段不生成坐标，只生成意图。
+*   **Structure**:
+    *   `8x8` -> `16x16`: Upsample + Concat(F2) + Conv
+    *   `16x16` -> `32x32`: Upsample + Concat(F1) + Conv
+    *   `32x32` -> `64x64`: Upsample + Conv
+*   **Fusion Strategy**: `Concat + Conv` 保留更多高频细节。
+*   **Deep Supervision**: 在中间层 (16x16, 32x32) 添加辅助 Skeleton Loss，强迫模型从粗尺度就关注骨架。
 
-### 4.3 模块 C: Geometry Artist (Stage 2)
+### 3.3 Prediction Heads (The "Sensors")
 
-**功能**: 执行中心。并行计算亚像素精度。
+模型输出 5 张与原图同尺寸的特征图：
 
-*   **架构**: Non-Autoregressive MLP (并行)。
-*   **输入**:
-    *   Grid Sequence (Stage 1 的输出)。
-    *   Local Context: 根据 Grid ID 从 `F_High` (32x32) 中采样的局部视觉特征。
-*   **输出头**:
-    1.  **On-Curve Head**: 输出 $4 \times 2$ 个值，代表 $\{P_{start}, P_{1/3}, P_{2/3}, P_{end}\}$ 相对于 **Grid 中心** 的偏移量 (Offset)。
-    2.  **Width Head**: 输出 $\{w_{start}, w_{end}\}$。
+1.  **Skeleton Map (骨架图)**
+    *   `[B, 1, 64, 64]`, Sigmoid
+    *   含义: 像素是否在笔画中心线上。
+    *   Loss: BCE + Dice (解决正负样本不平衡)。
 
-### 4.4 模块 D: Math Transform Layer
+2.  **Junction Map (节点图)**
+    *   `[B, 1, 64, 64]`, Sigmoid
+    *   含义: 像素是否是端点或交叉点。
+    *   Loss: MSE (Gaussian Heatmap GT)。
 
-**功能**: 纯数学确定性映射。
+3.  **Tangent Field (切向场)**
+    *   `[B, 2, 64, 64]`, Tanh
+    *   含义: 每个 skeleton 像素处的笔画方向单位向量 $(cos\theta, sin\theta)$。
+    *   Loss: Cosine Similarity Loss (只监督 Skeleton 区域)。
 
-*   **原理**: 已知三次贝塞尔曲线 $B(t)$ 在 $t=\{0, 1/3, 2/3, 1\}$ 四处的点，反解控制点 $P_0, P_1, P_2, P_3$。
-*   **公式**:
-    $$ \mathbf{P}_{control} = \mathbf{M}^{-1} \cdot \mathbf{P}_{on\_curve} $$
-*   **矩阵 $\mathbf{M}^{-1}$** (预计算常数):
-    该矩阵一定可逆。推理时由 GPU/CPU 进行一次矩阵乘法即可。
+4.  **Width Map (宽度图)**
+    *   `[B, 1, 64, 64]`, ReLU
+    *   含义: 每个 skeleton 像素处的笔画宽度。
+    *   Loss: L1 Loss (只监督 Skeleton 区域)。
+
+5.  **Offset Map (偏移图)**
+    *   `[B, 2, 64, 64]`, Tanh
+    *   含义: 像素中心到真实骨架中心的亚像素偏移 $(\delta x, \delta y)$。
+    *   Loss: L1 Loss (只监督 Skeleton 区域)。
+
+### 3.4 Post-Processing (The "Builder")
+
+这部分是纯算法逻辑，建议用 Rust (`ink_trace_rs`) 实现以保证性能。
+
+1.  **Graph Construction**:
+    *   利用 Junction Map 提取节点 $V$。
+    *   利用 Skeleton Map 提取边 $E$。
+    *   构建无向图 $G=(V, E)$。
+
+2.  **Path Tracing (BFS/DFS)**:
+    *   从每个节点出发，沿着 Skeleton 像素游走。
+    *   利用 Offset Map 修正像素坐标，得到亚像素点链。
+    *   利用 Tangent Field 解决交叉路口的歧义。
+
+3.  **Curve Fitting**:
+    *   对每条提取出的点链，结合 Width Map。
+    *   使用 **最小二乘法 (Least Squares)** 拟合三次贝塞尔曲线参数 $P_0, P_1, P_2, P_3$。
+    *   约束条件: $P_0, P_3$ 必须位于路径端点。
 
 ---
 
-## 5. 推理与抗漂移策略 (Inference & Drift Mitigation)
+## 4. 训练策略 (Training Strategy)
 
-### 5.1 Zig-Zag 扫描与边界传递
+### 4.1 GT 生成 (Data Pipeline)
+需要修改 `dataset.py`，在线生成 Dense GT Maps。
+*   利用 Rust 渲染引擎，在渲染时直接生成 Skeleton, Distance Transform (Width), Tangent 等 buffer。
+*   无需复杂的序列化/Tokenization。
 
-1.  **扫描顺序**: 蛇形扫描 (Zig-Zag) 遍历所有 Tile。
-2.  **状态传递**:
-    *   Tile $T_i$ 推理完成后，计算其与右侧 $T_{i+1}$ 和下方 $T_{row+1}$ 的交点。
-    *   这些交点不仅仅是坐标值，还包含**切线方向**。
-    *   将这些信息打包成 Boundary Prompts 传递给下一个 Tile。
+### 4.2 Loss Function
+$$L = \lambda_1 L_{skel} + \lambda_2 L_{junc} + \lambda_3 L_{tan} + \lambda_4 L_{width} + \lambda_5 L_{offset}$$
+建议权重: Skeleton 最重要 (10.0), Junction 次之 (5.0), 其余辅助 (1.0)。
 
-### 5.2 抗漂移设计 (Overlapped Context)
-
-*   **风险**: 误差可能会随 Tile 传递累积。
-*   **解决方案**: **Context Padding**。
-    *   输入 Tile 虽然负责重建 $64 \times 64$ 中心区域，但实际 Crop 图像时取 $80 \times 80$ (四周各扩 8px)。
-    *   Encoder 可以“看到”相邻 Tile 的一部分墨水。
-    *   当传入的 Boundary Prompt 稍微偏离墨水中心时，模型能依据 Padding 中的视觉信息，在当前 Tile 内部迅速将线条“拉回”墨水中心。
+### 4.3 Phase 规划
+*   **Phase 1**: Encoder Pretraining (直接复用)。
+*   **Phase 2**: Dense Head Training. 冻结 Encoder，训练 Decoder 和 Heads。
+*   **Phase 3**: End-to-End Finetuning.
 
 ---
 
-## 6. 训练规划 (Training Strategy)
+## 5. 项目路线图 (Roadmap)
 
-### Phase 1: Encoder Adaptation
-*   复用 Phase 1 权重，添加 FPN 和 Boundary Encoder。
-*   冻结 Backbone，训练 FPN 和 Boundary Injection。
+### Step 1: 数据准备 (Rust Side)
+*   [ ] 扩展 Rust 渲染器，支持输出 Skeleton Map, Junction Map, Tangent Map 等 Buffer。
 
-### Phase 2: Topology Pretraining
-*   数据: 使用 Rust 生成器生成大量 Grid 序列离散标签。
-*   任务: 训练 Stage 1 Commander (Cross-Entropy Loss)。
-*   目标: 所有的笔顺、结构、拓扑连接必须在此阶段学会。
+### Step 2: 模型搭建 (Python Side)
+*   [ ] 实现 `DenseVectorNet` (Encoder + U-Net Decoder + Heads)。
+*   [ ] 定义多任务 Loss 函数。
 
-### Phase 3: Geometry Tuning
-*   数据: 使用 Render 出来的实点坐标。
-*   任务: 冻结 Stage 1，训练 Stage 2 Artist (L1 Loss)。
-*   目标: 学会精准的描线和宽度预测。
+### Step 3: 训练验证
+*   [ ] 跑通单个 Batch 的过拟合。
+*   [ ] 可视化所有 Head 的输出，确保 GT 正确。
 
-### Phase 4: Joint Finetuning
-*   全参数微调，可能引入真实的 TTF 字体数据进行域适应。
+### Step 4: 后处理实现
+*   [ ] 实现 Python 版原型 (Graph builder + Fitter)。
+*   [ ] 移植到 Rust (`ink_trace_rs`) 加速。
 
