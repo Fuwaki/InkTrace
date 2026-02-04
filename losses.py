@@ -8,7 +8,7 @@ class DenseLoss(nn.Module):
     Multi-task loss for InkTrace V4
     L = L_skel + L_junc + L_tan + L_width + L_offset
 
-    Note: Uses clamp to avoid numerical issues with BCE under AMP (autocast).
+    Note: Uses float32 casting for numerical stability under AMP.
     """
 
     def __init__(self, weights=None):
@@ -23,8 +23,9 @@ class DenseLoss(nn.Module):
         }
 
     def _dice_loss(self, pred, target, smooth=1.0):
-        pred = pred.contiguous()
-        target = target.contiguous()
+        # Cast to float32 for numerical stability
+        pred = pred.float().contiguous()
+        target = target.float().contiguous()
         intersection = (pred * target).sum(dim=[2, 3])
         loss = 1 - (
             (2.0 * intersection + smooth)
@@ -34,14 +35,15 @@ class DenseLoss(nn.Module):
 
     def _safe_bce(self, pred, target):
         """
-        AMP-safe BCE loss.
-        Clamp predictions and compute BCE manually to avoid autocast issues.
+        AMP-safe BCE loss using F.binary_cross_entropy_with_logits.
+        We convert sigmoid outputs back to logits for numerical stability.
         """
-        # Clamp to avoid log(0)
-        pred = pred.clamp(min=1e-7, max=1 - 1e-7)
-        # Manual BCE: -[y*log(p) + (1-y)*log(1-p)]
-        bce = -(target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
-        return bce.mean()
+        # Cast to float32 and clamp for stability
+        pred = pred.float().clamp(min=1e-6, max=1 - 1e-6)
+        target = target.float()
+        # Convert probability to logits: logit = log(p / (1-p))
+        logits = torch.log(pred / (1 - pred))
+        return F.binary_cross_entropy_with_logits(logits, target, reduction='mean')
 
     def forward(self, outputs, targets):
         """
@@ -57,42 +59,34 @@ class DenseLoss(nn.Module):
         dice_skel = self._dice_loss(pred_skel, tgt_skel)
         losses["loss_skel"] = self.weights["skeleton"] * (bce_skel + dice_skel)
 
-        # 2. Junction Loss (MSE/BCE for Heatmap)
-        # If junctions are splatted gaussians (0-1), MSE is good.
-        # If binary points, BCE/Focal is better.
-        # Current generator makes them binary or near binary.
-        # Let's use MSE as per spec.
-        pred_junc = outputs["junction"]
-        tgt_junc = targets["junction"]
+        # 2. Junction Loss (MSE for Heatmap)
+        pred_junc = outputs["junction"].float()
+        tgt_junc = targets["junction"].float()
         losses["loss_junc"] = self.weights["junction"] * F.mse_loss(pred_junc, tgt_junc)
 
         # Masking for regression tasks
         # Only compute loss where skeleton is present (in GT)
         mask = (tgt_skel > 0.5).float()
-        num_fg = mask.sum() + 1e-6
+        num_fg = mask.sum().clamp(min=1.0)  # At least 1 to avoid div by zero
 
-        # 3. Tangent Loss (Cosine Similarity or L2)
-        # Targets are unit vectors (cos, sin). Pred is Tanh.
-        # We should encourage pred to be unit vector?
-        # Or just L2 loss on components.
-        pred_tan = outputs["tangent"]  # [B, 2, H, W]
-        tgt_tan = targets["tangent"]
+        # 3. Tangent Loss (L2 on masked region)
+        pred_tan = outputs["tangent"].float()  # [B, 2, H, W]
+        tgt_tan = targets["tangent"].float()
 
-        # L2 Loss on masked region
         l2_tan = (pred_tan - tgt_tan) ** 2
         l2_tan = (l2_tan * mask.unsqueeze(1)).sum() / num_fg / 2.0
         losses["loss_tan"] = self.weights["tangent"] * l2_tan
 
         # 4. Width Loss (L1)
-        pred_width = outputs["width"]
-        tgt_width = targets["width"]
+        pred_width = outputs["width"].float()
+        tgt_width = targets["width"].float()
         l1_width = torch.abs(pred_width - tgt_width)
         l1_width = (l1_width * mask).sum() / num_fg
         losses["loss_width"] = self.weights["width"] * l1_width
 
         # 5. Offset Loss (L1)
-        pred_off = outputs["offset"]
-        tgt_off = targets["offset"]
+        pred_off = outputs["offset"].float()
+        tgt_off = targets["offset"].float()
         l1_off = torch.abs(pred_off - tgt_off)
         l1_off = (l1_off * mask.unsqueeze(1)).sum() / num_fg / 2.0
         losses["loss_off"] = self.weights["offset"] * l1_off

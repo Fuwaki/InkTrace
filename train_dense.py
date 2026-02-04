@@ -127,7 +127,16 @@ def train(args):
                 losses = criterion(outputs, targets)
                 loss = losses["total"]
 
+            # Check for NaN loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"\n⚠️ NaN/Inf loss detected, skipping batch")
+                continue
+
             loss.backward()
+            
+            # Gradient clipping to prevent explosion
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             scheduler.step()
 
