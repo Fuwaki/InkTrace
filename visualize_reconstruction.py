@@ -21,7 +21,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
-from models import ModelFactory, ReconstructionModel
+from encoder import StrokeEncoder
+from pixel_decoder import PixelDecoder, ReconstructionModel
 from datasets import InkTraceDataset
 
 # ==================== 配置定义 ====================
@@ -123,13 +124,54 @@ def load_model(checkpoint_path, device):
 
     print(f"正在加载模型: {checkpoint_path}")
 
-    # 使用 Factory 加载，它会自动处理结构创建
+    # 直接用新架构加载（不做旧模型兼容映射；旧权重请先用 convert_checkpoint.py 转换）
     try:
-        model = ModelFactory.load_reconstruction_model(checkpoint_path, device=device)
-        print(f"  ✓ 模型加载成功 (ReconstructionModel)")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-        # 打印一下 loss 信息（如果存在）
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        if "encoder_state_dict" not in checkpoint:
+            raise KeyError("checkpoint 缺少 encoder_state_dict")
+
+        encoder_state = checkpoint["encoder_state_dict"]
+
+        # infer embed_dim from token_embed.weight: [embed_dim, feature_dim]
+        if "token_embed.weight" not in encoder_state:
+            raise KeyError(
+                "encoder_state_dict 缺少 token_embed.weight，无法推断 embed_dim"
+            )
+        embed_dim = int(encoder_state["token_embed.weight"].shape[0])
+
+        # 如果是未转换的旧权重，会包含 stem.*，新架构需要 stem1/stem2
+        has_old_stem = any(k.startswith("stem.") for k in encoder_state.keys())
+        if has_old_stem:
+            raise RuntimeError(
+                "检测到旧版 encoder 权重 (stem.*)。请先运行：\n"
+                f"  python convert_checkpoint.py --input {checkpoint_path} --output <new_path>\n"
+                "然后用转换后的 _v2.pth 再运行可视化。"
+            )
+
+        encoder = StrokeEncoder(in_channels=1, embed_dim=embed_dim).to(device)
+        decoder = PixelDecoder(embed_dim=embed_dim).to(device)
+        model = ReconstructionModel(encoder, decoder).to(device)
+
+        msg = model.encoder.load_state_dict(encoder_state, strict=True)
+        assert not msg.missing_keys and not msg.unexpected_keys
+
+        # Decoder key naming: support both 'decoder_state_dict' and 'pixel_decoder_state_dict'
+        if "decoder_state_dict" in checkpoint:
+            decoder_state = checkpoint["decoder_state_dict"]
+        elif "pixel_decoder_state_dict" in checkpoint:
+            decoder_state = checkpoint["pixel_decoder_state_dict"]
+        else:
+            raise KeyError(
+                "checkpoint 缺少 decoder_state_dict / pixel_decoder_state_dict"
+            )
+
+        msg2 = model.decoder.load_state_dict(decoder_state, strict=True)
+        assert not msg2.missing_keys and not msg2.unexpected_keys
+
+        model.eval()
+        print(f"  ✓ 模型加载成功 (New ReconstructionModel, embed_dim={embed_dim})")
+
         if "loss" in checkpoint:
             print(f"  Checkpoint Loss: {checkpoint['loss']:.6f}")
         if "epoch" in checkpoint:
