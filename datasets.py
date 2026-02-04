@@ -2,7 +2,7 @@
 InkTrace Dense Dataset
 
 封装 Rust 数据生成 + Python Dense GT 生成，为模型训练提供统一接口。
-支持渐进式训练（Curriculum Learning）：分辨率/笔画数递增。
+支持渐进式训练（Curriculum Learning）：笔画数递增 + 连续模式。
 """
 
 import torch
@@ -28,11 +28,9 @@ class DenseInkTraceDataset(IterableDataset):
             - offset:   [2, H, W]
         - labels: [N, 11] 原始矢量参数 (用于验证/可视化)
 
-    渐进训练支持:
-        通过 set_curriculum() 动态调整:
-        - img_size: 分辨率 (32 -> 64 -> 128)
-        - max_strokes: 最大笔画数 (1 -> 3 -> 5 -> 8)
-        - stroke_range: 笔画数范围 (min, max)
+    渐进训练支持 (curriculum stages):
+        Stage 0-3: 独立笔画 (independent)
+        Stage 4-6: 连续笔画 (continuous) - G1 连续的多段曲线
     """
 
     def __init__(
@@ -59,41 +57,67 @@ class DenseInkTraceDataset(IterableDataset):
         self.rust_threads = rust_threads
         self.return_vector_labels = return_vector_labels
 
+        # Curriculum configs: 
+        # Format: (mode, config_dict)
+        # - "independent": {"max_strokes": N, "stroke_range": (min, max)}
+        # - "continuous": {"max_segments": N}
+        # - "multi_path": {"max_paths": N, "segments_range": (min, max)}
         self.curriculum_configs = {
-            0: (64, 1, (1, 1)),
-            1: (64, 3, (1, 3)),
-            2: (64, 5, (2, 5)),
-            3: (64, 8, (3, 8)),
-            4: (128, 8, (3, 8)),
-            5: (128, 12, (5, 12)),
+            # Independent strokes (单段独立笔画)
+            0: ("independent", {"max_strokes": 1, "stroke_range": (1, 1)}),
+            1: ("independent", {"max_strokes": 3, "stroke_range": (1, 3)}),
+            2: ("independent", {"max_strokes": 5, "stroke_range": (2, 5)}),
+            3: ("independent", {"max_strokes": 8, "stroke_range": (3, 8)}),
+            # Continuous strokes (单条多段连续曲线)
+            4: ("continuous", {"max_segments": 3}),
+            5: ("continuous", {"max_segments": 5}),
+            6: ("continuous", {"max_segments": 8}),
+            # Multi-path strokes (多条多段连续曲线)
+            7: ("multi_path", {"max_paths": 2, "segments_range": (2, 3)}),
+            8: ("multi_path", {"max_paths": 3, "segments_range": (2, 4)}),
+            9: ("multi_path", {"max_paths": 4, "segments_range": (2, 5)}),
         }
+        
+        # Internal state
+        self.multi_path_config = None
 
         self._apply_curriculum()
 
     def _apply_curriculum(self):
         if self.curriculum_stage in self.curriculum_configs:
-            cfg = self.curriculum_configs[self.curriculum_stage]
-            self.img_size = cfg[0]
-            self.max_strokes = cfg[1]
-            self.stroke_range = cfg[2]
+            mode, cfg = self.curriculum_configs[self.curriculum_stage]
+            self.mode = mode
+            
+            if mode == "independent":
+                self.max_strokes = cfg["max_strokes"]
+                self.stroke_range = cfg["stroke_range"]
+                self.multi_path_config = None
+            elif mode == "continuous":
+                self.max_strokes = cfg["max_segments"]
+                self.stroke_range = None
+                self.multi_path_config = None
+            elif mode == "multi_path":
+                self.max_strokes = cfg["max_paths"] * cfg["segments_range"][1]
+                self.stroke_range = None
+                self.multi_path_config = cfg
 
     def set_curriculum(self, stage: int):
         self.curriculum_stage = stage
         self._apply_curriculum()
         print(
-            f"[Curriculum] Stage {stage}: img_size={self.img_size}, "
-            f"max_strokes={self.max_strokes}, range={self.stroke_range}"
+            f"[Curriculum] Stage {stage}: max_strokes={self.max_strokes}, "
+            f"range={self.stroke_range}, mode={self.mode}"
         )
 
     def set_custom_curriculum(
-        self, img_size: int, max_strokes: int, stroke_range: tuple
+        self, max_strokes: int, stroke_range: tuple, continuous: bool = False
     ):
-        self.img_size = img_size
         self.max_strokes = max_strokes
         self.stroke_range = stroke_range
+        self.mode = "continuous" if continuous else "independent"
         print(
-            f"[Curriculum] Custom: img_size={img_size}, "
-            f"max_strokes={max_strokes}, range={stroke_range}"
+            f"[Curriculum] Custom: max_strokes={max_strokes}, "
+            f"range={stroke_range}, mode={self.mode}"
         )
 
     def _generate_batch(self):
@@ -114,6 +138,15 @@ class DenseInkTraceDataset(IterableDataset):
         elif self.mode == "continuous":
             return ink_trace_rs.generate_continuous_strokes_batch(
                 self.batch_size, self.img_size, self.max_strokes
+            )
+        elif self.mode == "multi_path":
+            cfg = self.multi_path_config
+            return ink_trace_rs.generate_multi_path_strokes_batch(
+                self.batch_size, 
+                self.img_size, 
+                cfg["max_paths"],
+                cfg["segments_range"],
+                None  # fixed_path_count
             )
         else:
             raise ValueError(f"Unknown mode: {self.mode}")

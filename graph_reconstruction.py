@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-InkTrace Graph Reconstruction Algorithm (Python Prototype v3)
+InkTrace Graph Reconstruction Algorithm (Simplified)
 
-改进版本：
+基于 Skeleton Topology 的重建：
 1. 使用形态学骨架细化
-2. 更鲁棒的端点/交叉点检测
-3. 正确的坐标系统处理
-4. 利用 offset map 进行亚像素修正
+2. 基于邻居数的特异点检测 (端点=1, 连接点/交叉点>=3)
+3. 路径追踪与合并
+4. 贝塞尔曲线拟合
 """
 
 import numpy as np
@@ -50,7 +50,7 @@ class SimpleGraphReconstructor:
         Args:
             pred_maps: dict of prediction arrays
                 - skeleton: [H, W]
-                - junction: [H, W] (optional)
+                - junction: [H, W] (Marks both endpoints and internal nodes)
                 - tangent: [2, H, W] (optional)
                 - offset: [2, H, W] (optional)
                 - width: [H, W] (optional)
@@ -74,23 +74,72 @@ class SimpleGraphReconstructor:
         else:
             skeleton_thin = skeleton_binary
 
-        print(
-            f"  Skeleton pixels before/after thinning: {skeleton_binary.sum()} -> {skeleton_thin.sum()}"
-        )
-
-        # Phase 2: Find endpoints and junctions from thinned skeleton
-        endpoints, junctions = self._find_endpoints_and_junctions(
+        # Phase 2: Find special points (endpoints and internal nodes)
+        # We classify them based on topology primarily, validated by junction map
+        endpoints, internal_nodes = self._find_topology_points(
             skeleton_thin, pred.get("junction")
         )
 
-        print(f"  Found {len(endpoints)} endpoints, {len(junctions)} junctions")
-
+        
         # Phase 3: Trace complete strokes
-        strokes = self._trace_strokes(skeleton_thin, endpoints, junctions, pred)
-
-        print(f"  Traced {len(strokes)} strokes")
+        strokes = self._trace_strokes(skeleton_thin, endpoints, internal_nodes, pred)
 
         return strokes
+
+    def _find_topology_points(self, skeleton, junction_map=None):
+        """
+        根据骨架拓扑结构寻找特殊点
+        
+        Endpoint: 1 neighbor
+        Internal Node (Connection/Junction): >= 3 neighbors OR >= 2 neighbors & high junction score
+        
+        Returns:
+            endpoints: list of (row, col)
+            internal_nodes: list of (row, col) (includes connections and crossings)
+        """
+        H, W = skeleton.shape
+        endpoint_list = []
+        internal_list = []
+
+        # 构建邻居计数矩阵
+        kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.float32)
+        neighbor_count = ndimage.convolve(
+            skeleton.astype(np.float32), kernel, mode="constant"
+        )
+
+        # 只在skeleton像素上计算
+        skeleton_coords = np.argwhere(skeleton)
+
+        for coord in skeleton_coords:
+            row, col = coord
+            n_neighbors = int(neighbor_count[row, col])
+
+            if n_neighbors == 1:
+                endpoint_list.append((row, col))
+            elif n_neighbors >= 3:
+                # Topologically a junction/connection
+                internal_list.append((row, col))
+            elif n_neighbors == 2 and junction_map is not None:
+                # Check if it's a "virtual" breakdown point (sharp turn or segmentation point)
+                if junction_map[row, col] > self.junction_threshold:
+                    internal_list.append((row, col))
+
+        # Junction map validation for endpoints (optional but good for noise removal)
+        if junction_map is not None:
+            validated_endpoints = []
+            for ep in endpoint_list:
+                row, col = ep
+                # Search local max in junction map
+                r_min, r_max = max(0, row - 2), min(H, row + 3)
+                c_min, c_max = max(0, col - 2), min(W, col + 3)
+                if junction_map[r_min:r_max, c_min:c_max].max() > self.junction_threshold:
+                    validated_endpoints.append(ep)
+            
+            # If we lose too many endpoints, fallback to raw topological endpoints
+            if len(validated_endpoints) > 0:
+                endpoint_list = validated_endpoints
+
+        return endpoint_list, internal_list
 
     def _to_numpy(self, pred_maps):
         """Convert tensors to numpy arrays"""
@@ -110,271 +159,130 @@ class SimpleGraphReconstructor:
             pred[key] = arr
         return pred
 
-    def _find_endpoints_and_junctions(self, skeleton, junction_map=None):
-        """
-        找到skeleton的端点和交叉点
-
-        使用 (row, col) 即 (y, x) 坐标格式
-
-        Returns:
-            endpoints: list of (row, col) tuples
-            junctions: list of (row, col) tuples
-        """
-        H, W = skeleton.shape
-        endpoint_list = []
-        junction_list = []
-
-        # 构建邻居计数矩阵 (更高效)
-        # 使用卷积计算每个像素的8邻居数量
-        kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.float32)
-        neighbor_count = ndimage.convolve(
-            skeleton.astype(np.float32), kernel, mode="constant"
-        )
-
-        # 只在skeleton像素上计算
-        skeleton_coords = np.argwhere(skeleton)  # (N, 2) -> (row, col)
-
-        for coord in skeleton_coords:
-            row, col = coord
-            n_neighbors = int(neighbor_count[row, col])
-
-            if n_neighbors == 1:
-                # Endpoint: 只有1个邻居
-                endpoint_list.append((row, col))
-            elif n_neighbors >= 3:
-                # Junction: 3个或更多邻居
-                # 但需要进一步验证，避免锯齿导致的假阳性
-                # 检查是否是真正的分叉点
-                if self._is_true_junction(skeleton, row, col):
-                    junction_list.append((row, col))
-
-        # 如果提供了junction_map，用它来辅助验证
-        if junction_map is not None:
-            # 只保留在junction_map中也有高响应的点
-            validated_junctions = []
-            for junc in junction_list:
-                row, col = junc
-                # 检查3x3邻域内的最大junction响应
-                r_min, r_max = max(0, row - 1), min(H, row + 2)
-                c_min, c_max = max(0, col - 1), min(W, col + 2)
-                local_max = junction_map[r_min:r_max, c_min:c_max].max()
-                if local_max > self.junction_threshold:
-                    validated_junctions.append(junc)
-
-            # 如果验证后junction太少，使用原始检测结果
-            if len(validated_junctions) > 0:
-                junction_list = validated_junctions
-
-        return endpoint_list, junction_list
-
-    def _is_true_junction(self, skeleton, row, col):
-        """
-        验证是否是真正的分叉点（而不是锯齿）
-
-        使用连通性分析：真正的分叉点周围应该有3个或更多独立的连通区域
-        """
-        H, W = skeleton.shape
-
-        # 提取3x3邻域
-        r_min, r_max = max(0, row - 1), min(H, row + 2)
-        c_min, c_max = max(0, col - 1), min(W, col + 2)
-
-        # 创建邻域副本，移除中心点
-        neighborhood = skeleton[r_min:r_max, c_min:c_max].copy()
-        local_row = row - r_min
-        local_col = col - c_min
-        neighborhood[local_row, local_col] = False
-
-        # 计算连通分量数量
-        labeled, num_features = label(neighborhood)
-
-        # 真正的分叉点应该有3个或更多独立的分支
-        return num_features >= 3
-
-    def _trace_strokes(self, skeleton, endpoints, junctions, pred):
+    def _trace_strokes(self, skeleton, endpoints, internal_nodes, pred):
         """
         追踪所有完整的笔画
-
-        坐标使用 (row, col) 格式
-
         Strategy:
-        1. Start from each endpoint
-        2. Walk along skeleton until hitting another endpoint
-        3. If cross_junctions=True, allow passing through junction pixels
+        1. Break skeleton into segments at internal nodes
+        2. Trace each segment from node to node (or node to endpoint)
         """
-        # 所有skeleton像素集合 (row, col) 格式
+        # 所有skeleton像素集合
         all_pixels = set(map(tuple, np.argwhere(skeleton)))
-
-        # 分别追踪已使用的端点和已完全追踪的像素
-        used_endpoints = set()
-        visited_pixels = set()  # 已追踪的非交叉点像素
-        junction_set = set(junctions)
-        endpoint_set = set(endpoints)
-
+        
+        # Nodes where tracing stops
+        stop_nodes = set(endpoints + internal_nodes)
+        
+        visited_segments = set() # Store as sets of frozensets of points to avoid duplicates
+        visited_pixels = set()
+        
         strokes = []
+        
+        # Seeds for tracing: endpoints and internal nodes
+        # We need to trace from every neighbor of every node
+        seeds = []
+        
+        # 1. Add all endpoints as seeds
+        seeds.extend(endpoints)
+        
+        # 2. Add all internal nodes as seeds
+        seeds.extend(internal_nodes)
+        
+        for start_node in seeds:
+            # Get all neighbors of this node that are skeleton pixels
+            neighbors = self._get_8neighbors(start_node, all_pixels)
+            
+            for neighbor in neighbors:
+                # Unique segment ID: tuple of sorted (start_node, neighbor)
+                # This only works for the first step. For full segment deduplication we check visited pixels.
+                
+                if neighbor in visited_pixels: 
+                    # Heuristic: if neighbor is already fully processed, skip. 
+                    # Note: internal nodes are never "visited" in the sense of being consumed.
+                    if neighbor not in stop_nodes: 
+                        continue
 
-        # Combine all special points
-        all_nodes = set(endpoints + junctions)
-
-        # Start from each endpoint
-        for start_point in endpoints:
-            if start_point in used_endpoints:
-                continue
-
-            # Trace from this endpoint
-            stroke_pixels = self._walk_from_point_v2(
-                start_point,
-                skeleton,
-                endpoint_set,
-                junction_set,
-                visited_pixels,
-                used_endpoints,
-                pred,
-            )
-
-            if len(stroke_pixels) >= self.min_stroke_length:
-                # 转换为 (x, y) 格式用于输出
-                points_xy = [(col, row) for (row, col) in stroke_pixels]
-                width = self._estimate_width(stroke_pixels, pred.get("width"))
-                strokes.append(
-                    {
-                        "points": points_xy,
-                        "points_rc": stroke_pixels,
-                        "width": width,
-                        "start_junction": start_point in junction_set,
-                        "end_junction": stroke_pixels[-1] in all_nodes,
-                    }
+                # Trace this segment
+                segment_pixels = self._trace_segment(
+                    start_node, neighbor, skeleton, stop_nodes, pred
                 )
 
-        # Handle isolated loops or unvisited segments
-        remaining = all_pixels - visited_pixels - junction_set
-        while remaining:
-            start = remaining.pop()
-            stroke_pixels = self._walk_from_point_v2(
-                start,
-                skeleton,
-                endpoint_set,
-                junction_set,
-                visited_pixels,
-                used_endpoints,
-                pred,
-                max_steps=1000,
-            )
+                if segment_pixels and len(segment_pixels) >= self.min_stroke_length:
+                    # Check if we've seen this segment (reverse check)
+                    # We use midpoint to roughly identify the segment
+                    mid_idx = len(segment_pixels) // 2
+                    mid_point = segment_pixels[mid_idx]
+                    
+                    if mid_point in visited_pixels and mid_point not in stop_nodes:
+                        continue
+                        
+                    # Mark pixels as visited
+                    for p in segment_pixels:
+                        if p not in stop_nodes:
+                            visited_pixels.add(p)
 
-            if len(stroke_pixels) >= self.min_stroke_length:
-                points_xy = [(col, row) for (row, col) in stroke_pixels]
-                width = self._estimate_width(stroke_pixels, pred.get("width"))
-                strokes.append(
-                    {
+                    # Output stroke
+                    points_xy = [(col, row) for (row, col) in segment_pixels]
+                    width = self._estimate_width(segment_pixels, pred.get("width"))
+                    
+                    strokes.append({
                         "points": points_xy,
-                        "points_rc": stroke_pixels,
+                        "points_rc": segment_pixels,
                         "width": width,
-                        "start_junction": False,
-                        "end_junction": False,
-                    }
-                )
-
-            remaining = all_pixels - visited_pixels - junction_set
+                    })
 
         return strokes
 
-    def _walk_from_point_v2(
-        self,
-        start_point,
-        skeleton,
-        endpoints,
-        junctions,
-        visited_pixels,
-        used_endpoints,
-        pred,
-        max_steps=1000,
-    ):
+    def _trace_segment(self, start_node, second_pixel, skeleton, stop_nodes, pred):
         """
-        改进版的追踪函数：
-        - visited_pixels: 已完全追踪的非交叉点像素（不能再访问）
-        - junctions: 交叉点像素（可以穿越，不标记为已访问）
-        - endpoints: 端点像素（作为停止条件）
+        Trace a single segment from start_node passing through second_pixel
+        Stops when hitting any node in stop_nodes
+        """
+        if second_pixel in stop_nodes:
+             return [start_node, second_pixel]
 
-        坐标使用 (row, col) 格式
-        """
+        current = second_pixel
+        pixels = [start_node, current]
+        prev_direction = (current[0] - start_node[0], current[1] - start_node[1])
+        
         all_pixels = set(map(tuple, np.argwhere(skeleton)))
-
-        current = start_point
-        pixels = [current]
-
-        # 标记起点
-        if current in endpoints:
-            used_endpoints.add(current)
-        if current not in junctions:
-            visited_pixels.add(current)
-
-        prev_direction = None
-        local_visited = {current}  # 本次追踪中访问过的点，防止循环
-
+        
+        max_steps = 1000
         for _ in range(max_steps):
-            # 获取所有邻居
+            # Get neighbors
             neighbors = self._get_8neighbors(current, all_pixels)
-
-            # 筛选可访问的邻居
-            valid_neighbors = []
-            for n in neighbors:
-                # 跳过本次追踪已访问的点（防止循环）
-                if n in local_visited:
-                    continue
-
-                # 如果是交叉点，允许穿越（即使全局已访问）
-                if n in junctions:
-                    if self.cross_junctions:
-                        valid_neighbors.append(n)
-                    continue
-
-                # 非交叉点：检查是否全局已访问
-                if n not in visited_pixels:
-                    valid_neighbors.append(n)
-
-            if len(valid_neighbors) == 0:
+            
+            # Filter neighbors: not the one we came from
+            valid_candidates = [n for n in neighbors if n != pixels[-2]]
+            
+            if not valid_candidates:
+                break # Dead end
+                
+            # If any neighbor is a stop node, go there and finish
+            stop_candidates = [n for n in valid_candidates if n in stop_nodes]
+            if stop_candidates:
+                # Pick the best one if multiple (rare)
+                next_pixel = stop_candidates[0]
+                pixels.append(next_pixel)
                 break
-
-            if len(valid_neighbors) == 1:
-                next_pixel = valid_neighbors[0]
+            
+            # Regular traversal
+            if len(valid_candidates) == 1:
+                next_pixel = valid_candidates[0]
             else:
-                # Multiple choices - use tangent to guide
+                # Junction logic (should be rare if internal_nodes are correct)
                 next_pixel = self._select_by_tangent_or_direction(
-                    current, valid_neighbors, prev_direction, pred.get("tangent")
+                    current, valid_candidates, prev_direction, pred.get("tangent")
                 )
-
+            
             pixels.append(next_pixel)
-            local_visited.add(next_pixel)
-
-            # 更新全局状态
-            if next_pixel not in junctions:
-                visited_pixels.add(next_pixel)
-            if next_pixel in endpoints:
-                used_endpoints.add(next_pixel)
-
-            # Update direction
             prev_direction = (next_pixel[0] - current[0], next_pixel[1] - current[1])
             current = next_pixel
-
-            # 只在端点处停止（起点除外）
-            if current in endpoints and current != start_point:
+            
+            # Safety check (should be caught by stop_candidates but just in case)
+            if current in stop_nodes:
                 break
-
+                
         return pixels
-
-    def _is_endpoint(self, point, skeleton):
-        """判断一个点是否是端点（只有1个邻居）"""
-        row, col = point
-        H, W = skeleton.shape
-        neighbors = 0
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0:
-                    continue
-                nr, nc = row + dr, col + dc
-                if 0 <= nr < H and 0 <= nc < W and skeleton[nr, nc]:
-                    neighbors += 1
-        return neighbors == 1
 
     def _get_8neighbors(self, pixel, pixel_set):
         """Get 8-connected neighbors in (row, col) format"""
@@ -393,10 +301,7 @@ class SimpleGraphReconstructor:
         self, current, candidates, prev_direction, tangent_map
     ):
         """
-        选择下一个像素，优先考虑切线方向或继续直行
-
-        current和candidates使用 (row, col) 格式
-        tangent_map使用 [2, H, W] 格式，存储 (cos2θ, sin2θ)
+        选择下一个像素，优先考虑切线方向
         """
         if prev_direction is None:
             return candidates[0]
@@ -404,17 +309,13 @@ class SimpleGraphReconstructor:
         # 如果有tangent map，优先使用它
         if tangent_map is not None:
             row, col = current
-            # tangent是 (cos2θ, sin2θ)，需要还原为方向
             cos2t = tangent_map[0, row, col]
             sin2t = tangent_map[1, row, col]
-            # 还原角度 (有180度歧义，用prev_direction解决)
             theta = np.arctan2(sin2t, cos2t) / 2
 
-            # 两个可能的方向
-            dir1 = np.array([np.sin(theta), np.cos(theta)])  # (row_dir, col_dir)
+            dir1 = np.array([np.sin(theta), np.cos(theta)])
             dir2 = -dir1
 
-            # 选择与prev_direction更一致的那个
             prev_vec = np.array(prev_direction)
             prev_vec = prev_vec / (np.linalg.norm(prev_vec) + 1e-6)
 
@@ -423,7 +324,6 @@ class SimpleGraphReconstructor:
             else:
                 tangent_dir = dir2
 
-            # 选择与tangent方向最一致的候选点
             best_candidate = candidates[0]
             best_score = -2
 
@@ -438,7 +338,7 @@ class SimpleGraphReconstructor:
 
             return best_candidate
 
-        # Fallback: 继续沿着之前的方向走
+        # Fallback: Forward direction
         prev_vec = np.array(prev_direction)
         prev_vec = prev_vec / (np.linalg.norm(prev_vec) + 1e-6)
 
@@ -448,10 +348,7 @@ class SimpleGraphReconstructor:
         for cand in candidates:
             cand_vec = np.array([cand[0] - current[0], cand[1] - current[1]])
             cand_vec = cand_vec / (np.linalg.norm(cand_vec) + 1e-6)
-
-            # Prefer forward direction (dot product close to 1)
             score = np.dot(prev_vec, cand_vec)
-
             if score > best_score:
                 best_score = score
                 best_candidate = cand
@@ -459,10 +356,7 @@ class SimpleGraphReconstructor:
         return best_candidate
 
     def _estimate_width(self, points, width_map):
-        """估计路径的平均宽度
-
-        points使用 (row, col) 格式
-        """
+        """估计路径的平均宽度"""
         if width_map is None:
             return 2.0
 
@@ -475,180 +369,198 @@ class SimpleGraphReconstructor:
         return np.mean(widths) if widths else 2.0
 
 
-def fit_bezier_curves(strokes, tolerance=1.0):
+def fit_bezier_curves(strokes, tolerance=1.0, merge_connected=True, connection_tolerance=3.0):
     """
-    将追踪到的笔画拟合成贝塞尔曲线
-
-    Args:
-        strokes: list of dict with 'points' key
-        tolerance: fitting error tolerance
-
-    Returns:
-        curves: list of dict with 'points' (4 control points) and 'width'
+    将追踪到的笔画拟合成贝塞尔曲线，并根据拓扑重组路径
     """
     all_curves = []
 
-    for stroke in strokes:
+    for stroke_idx, stroke in enumerate(strokes):
         points = stroke["points"]
 
         if len(points) < 4:
-            # Too short, just return line
+            # Too short, straight line
             p0, p3 = points[0], points[-1]
             p1 = ((2 * p0[0] + p3[0]) / 3, (2 * p0[1] + p3[1]) / 3)
             p2 = ((p0[0] + 2 * p3[0]) / 3, (p0[1] + 2 * p3[1]) / 3)
 
-            all_curves.append({"points": [p0, p1, p2, p3], "width": stroke["width"]})
+            all_curves.append({
+                "points": [p0, p1, p2, p3], 
+                "width": stroke["width"],
+                "stroke_idx": stroke_idx,
+            })
         else:
-            # Fit one or multiple curves
+            # Fitting
             curves = fit_bezier_chain(points, tolerance)
             for curve in curves:
-                all_curves.append({"points": curve, "width": stroke["width"]})
+                all_curves.append({
+                    "points": curve, 
+                    "width": stroke["width"],
+                    "stroke_idx": stroke_idx,
+                })
+
+    # Merge connected curves into paths
+    if merge_connected and len(all_curves) > 1:
+        all_curves = _merge_connected_curves(all_curves, connection_tolerance)
 
     return all_curves
 
 
+def _merge_connected_curves(curves, tolerance=3.0):
+    """
+    Merge curves that are connected (endpoint of one == startpoint of another).
+    """
+    n = len(curves)
+    if n == 0:
+        return curves
+    
+    # Simple Greedy Merging
+    # Note: Complex topology handling is often better done on the vectorized graph structure
+    # Here we just chain simple G0 connections
+    
+    adjacency = {i: [] for i in range(n)}
+    reverse_adj = {i: [] for i in range(n)}
+    
+    for i in range(n):
+        end_i = np.array(curves[i]["points"][3])
+        for j in range(n):
+            if i == j: continue
+            start_j = np.array(curves[j]["points"][0])
+            dist = np.linalg.norm(end_i - start_j)
+            if dist < tolerance:
+                adjacency[i].append(j)
+                reverse_adj[j].append(i)
+    
+    visited = set()
+    path_id = 0
+    
+    # Helper to find path start
+    def find_start(idx):
+        curr = idx
+        path_set = {curr}
+        while True:
+            preds = [p for p in reverse_adj[curr] if p not in path_set] # Prevent loops
+            if not preds: break
+            curr = preds[0]
+            path_set.add(curr)
+        return curr
+
+    # Assign path IDs
+    for i in range(n):
+        if i in visited: continue
+        
+        start_node = find_start(i)
+        
+        # Walk forward
+        curr = start_node
+        path_order = 0
+        
+        while curr is not None:
+            if curr in visited: break
+            visited.add(curr)
+            
+            curves[curr]["path_id"] = path_id
+            curves[curr]["path_order"] = path_order
+            path_order += 1
+            
+            succs = [s for s in adjacency[curr] if s not in visited]
+            curr = succs[0] if succs else None
+            
+        path_id += 1
+        
+    return curves
+
+
+def get_continuous_paths(curves):
+    """Group curves by path_id"""
+    if not curves: return []
+    path_dict = {}
+    for curve in curves:
+        pid = curve.get("path_id", 0)
+        if pid not in path_dict: path_dict[pid] = []
+        path_dict[pid].append(curve)
+    
+    paths = []
+    for pid in sorted(path_dict.keys()):
+        paths.append(sorted(path_dict[pid], key=lambda c: c.get("path_order", 0)))
+    return paths
+
+
 def fit_bezier_chain(points, tolerance, max_depth=5, depth=0):
-    """
-    递归拟合贝塞尔曲线链
-
-    Args:
-        points: list of (x, y) tuples
-        tolerance: 最大允许误差
-        max_depth: 最大递归深度，避免过度分割
-        depth: 当前递归深度
-    """
+    """Recursively fit Bezier chain"""
     points_arr = np.array(points)
-
     if len(points) < 4:
         return [fit_single_bezier(points_arr)]
 
-    # Try single curve
     control_points = fit_single_bezier(points_arr)
     errors = compute_fitting_errors(points_arr, control_points)
-    max_error = np.max(errors)
-
-    # 停止条件：误差足够小，或者点太少，或者递归太深
-    if max_error <= tolerance or len(points) < 8 or depth >= max_depth:
+    if np.max(errors) <= tolerance or len(points) < 8 or depth >= max_depth:
         return [control_points]
 
-    # Split at worst point
     split_idx = np.argmax(errors)
-
-    # 确保分割点不在太靠近端点的位置
-    min_segment = max(4, len(points) // 4)
-    if split_idx < min_segment:
-        split_idx = min_segment
-    elif split_idx > len(points) - min_segment:
-        split_idx = len(points) - min_segment
-
-    # 如果分割后段太短，就不分割了
-    if split_idx < 4 or len(points) - split_idx < 4:
+    # Safety bounds
+    min_seg = max(4, len(points)//4)
+    split_idx = max(min_seg, min(len(points)-min_seg, split_idx))
+    
+    # If can't split effectively
+    if split_idx < 4 or len(points)-split_idx < 4:
         return [control_points]
 
-    # Recursively fit
-    left_curves = fit_bezier_chain(
-        points[: split_idx + 1], tolerance, max_depth, depth + 1
-    )
-    right_curves = fit_bezier_chain(points[split_idx:], tolerance, max_depth, depth + 1)
-
-    return left_curves + right_curves
+    left = fit_bezier_chain(points[:split_idx+1], tolerance, max_depth, depth+1)
+    right = fit_bezier_chain(points[split_idx:], tolerance, max_depth, depth+1)
+    return left + right
 
 
 def fit_single_bezier(points):
-    """
-    拟合单条三次贝塞尔曲线 (使用改进的最小二乘法)
-
-    三次贝塞尔曲线: B(t) = (1-t)³P₀ + 3(1-t)²tP₁ + 3(1-t)t²P₂ + t³P₃
-
-    Args:
-        points: numpy array of shape (n, 2)
-
-    Returns:
-        [P₀, P₁, P₂, P₃] - 四个控制点
-    """
+    """Least-squares fit cubic Bezier"""
     n = len(points)
-    p0 = points[0]
-    p3 = points[-1]
-
+    p0, p3 = points[0], points[-1]
+    
     if n <= 2:
-        # 太短，返回直线
-        p1 = ((2 * p0[0] + p3[0]) / 3, (2 * p0[1] + p3[1]) / 3)
-        p2 = ((p0[0] + 2 * p3[0]) / 3, (p0[1] + 2 * p3[1]) / 3)
+        p1 = ((2*p0[0]+p3[0])/3, (2*p0[1]+p3[1])/3)
+        p2 = ((p0[0]+2*p3[0])/3, (p0[1]+2*p3[1])/3)
         return [tuple(p0), tuple(p1), tuple(p2), tuple(p3)]
 
     # Chord length parameterization
-    chord_lengths = np.linalg.norm(points[1:] - points[:-1], axis=1)
-    total_length = np.sum(chord_lengths)
-
-    if total_length < 1e-6:
-        # 所有点重合
-        p1 = tuple(p0)
-        p2 = tuple(p3)
-        return [tuple(p0), p1, p2, tuple(p3)]
-
-    cumulative = np.cumsum(chord_lengths)
+    dists = np.linalg.norm(points[1:] - points[:-1], axis=1)
+    total = np.sum(dists)
+    if total < 1e-6:
+        return [tuple(p0), tuple(p0), tuple(p3), tuple(p3)]
+        
     t = np.zeros(n)
-    t[1:] = cumulative / total_length
-
-    # 构建线性系统来求解 P1 和 P2
-    # B(t) - (1-t)³P₀ - t³P₃ = 3(1-t)²t·P₁ + 3(1-t)t²·P₂
-
-    # 基函数
-    B1 = 3 * (1 - t) ** 2 * t  # P1 的系数
-    B2 = 3 * (1 - t) * t**2  # P2 的系数
-
-    # 构建 A 矩阵 [B1, B2]
+    t[1:] = np.cumsum(dists) / total
+    
+    # Basis functions
+    B1 = 3 * (1-t)**2 * t
+    B2 = 3 * (1-t) * t**2
     A = np.column_stack([B1, B2])
-
-    # 目标向量: 原始点 - 端点贡献
-    B0 = (1 - t) ** 3  # P0 的系数
-    B3 = t**3  # P3 的系数
-
+    
+    # Residuals
+    B0 = (1-t)**3
+    B3 = t**3
     b = points - np.outer(B0, p0) - np.outer(B3, p3)
-
+    
     try:
-        # 分别求解 x 和 y 坐标
-        sol_x, _, _, _ = np.linalg.lstsq(A, b[:, 0], rcond=None)
-        sol_y, _, _, _ = np.linalg.lstsq(A, b[:, 1], rcond=None)
-
-        p1 = (float(sol_x[0]), float(sol_y[0]))
-        p2 = (float(sol_x[1]), float(sol_y[1]))
-
-        # 检查控制点是否合理 (不要离端点太远)
-        max_dist = np.linalg.norm(p3 - p0) * 2
-        if (
-            np.linalg.norm(np.array(p1) - p0) > max_dist
-            or np.linalg.norm(np.array(p2) - p3) > max_dist
-        ):
-            # 控制点异常，退化为直线
-            p1 = ((2 * p0[0] + p3[0]) / 3, (2 * p0[1] + p3[1]) / 3)
-            p2 = ((p0[0] + 2 * p3[0]) / 3, (p0[1] + 2 * p3[1]) / 3)
-
-    except Exception:
-        # 拟合失败，返回直线
-        p1 = ((2 * p0[0] + p3[0]) / 3, (2 * p0[1] + p3[1]) / 3)
-        p2 = ((p0[0] + 2 * p3[0]) / 3, (p0[1] + 2 * p3[1]) / 3)
-
-    return [tuple(p0), tuple(p1), tuple(p2), tuple(p3)]
+        res = np.linalg.lstsq(A, b, rcond=None)[0]
+        p1 = tuple(res[0])
+        p2 = tuple(res[1])
+    except:
+        p1 = ((2*p0[0]+p3[0])/3, (2*p0[1]+p3[1])/3)
+        p2 = ((p0[0]+2*p3[0])/3, (p0[1]+2*p3[1])/3)
+        
+    return [tuple(p0), p1, p2, tuple(p3)]
 
 
 def compute_fitting_errors(points, control_points):
-    """计算拟合误差"""
+    """Compute min distance from points to curve"""
     p0, p1, p2, p3 = [np.array(p) for p in control_points]
-
-    # Sample curve
-    t = np.linspace(0, 1, len(points) * 2)
-    curve = (
-        np.outer((1 - t) ** 3, p0)
-        + np.outer(3 * (1 - t) ** 2 * t, p1)
-        + np.outer(3 * (1 - t) * t**2, p2)
-        + np.outer(t**3, p3)
-    )
-
-    # Find min distance for each point
-    errors = []
-    for p in points:
-        dists = np.linalg.norm(curve - p, axis=1)
-        errors.append(dists.min())
-
-    return np.array(errors)
+    t = np.linspace(0, 1, max(10, len(points)//2))
+    curve = np.outer((1-t)**3,p0) + np.outer(3*(1-t)**2*t,p1) + \
+            np.outer(3*(1-t)*t**2,p2) + np.outer(t**3,p3)
+            
+    # Simple approx: distance to closest sampled point
+    # Ideally should use point-to-curve distance
+    from scipy.spatial import cKDTree
+    tree = cKDTree(curve)
+    dists, _ = tree.query(points)
+    return dists

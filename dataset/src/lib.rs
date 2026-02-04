@@ -604,6 +604,125 @@ fn generate_multi_connected_strokes_batch(
     ))
 }
 
+/// Generates a batch of multiple independent continuous paths (flattened labels).
+/// Each path consists of multiple smooth segments. Labels are flattened to 3D.
+/// This is suitable for Dense Prediction training.
+///
+/// Args:
+///     batch_size: Number of samples
+///     img_size: Image size (64, 128, etc.)
+///     max_paths: Maximum number of independent paths
+///     segments_range: (min_segments, max_segments) per path
+///
+/// Returns:
+///     - images: [batch_size, img_size, img_size]
+///     - labels: [batch_size, max_total_strokes, 11]
+///         [..., :8] = [x0, y0, x1, y1, x2, y2, x3, y3]
+///         [..., 8]  = w_start
+///         [..., 9]  = w_end
+///         [..., 10] = 1.0 if valid, 0.0 if padding
+#[pyfunction]
+#[pyo3(signature = (batch_size, img_size, max_paths, segments_range, fixed_path_count=None))]
+fn generate_multi_path_strokes_batch(
+    py: Python,
+    batch_size: usize,
+    img_size: usize,
+    max_paths: usize,
+    segments_range: (usize, usize), // (min_segments, max_segments)
+    fixed_path_count: Option<usize>,
+) -> PyResult<(Py<PyArray3<f32>>, Py<PyArray3<f32>>)> {
+    
+    let (min_segs, max_segs) = segments_range;
+    // Max possible strokes = max_paths * max_segments
+    let max_total_strokes = max_paths * max_segs;
+    
+    let results: Vec<(Vec<f32>, Vec<f32>)> = (0..batch_size)
+        .into_par_iter()
+        .map(|_| {
+            let mut rng = rand::thread_rng();
+            let size_f = img_size as f32;
+            
+            // Random number of paths
+            let num_paths = match fixed_path_count {
+                Some(n) => n.min(max_paths),
+                None => rng.gen_range(1..=max_paths),
+            };
+            
+            let mut all_strokes: Vec<CubicBezier> = Vec::new();
+
+            for _ in 0..num_paths {
+                // Random number of segments for this path
+                let num_segments = rng.gen_range(min_segs..=max_segs);
+
+                // Random start for this path
+                let mut current_pos = Point::new(
+                    rng.gen::<f32>() * size_f * 0.8 + size_f * 0.1, 
+                    rng.gen::<f32>() * size_f * 0.8 + size_f * 0.1
+                );
+                
+                let mut incoming_tangent: Option<Point> = None;
+
+                for _ in 0..num_segments {
+                    let stroke = generate_natural_segment(
+                        current_pos.clone(), 
+                        incoming_tangent, 
+                        &mut rng, 
+                        (size_f * 0.12)..(size_f * 0.35),
+                        size_f
+                    );
+                    
+                    // Update state for next segment
+                    current_pos = stroke.p3.clone();
+                    incoming_tangent = Some((stroke.p3.clone() - stroke.p2.clone()).normalize());
+                    
+                    all_strokes.push(stroke);
+                }
+            }
+
+            let img_flat = render_strokes_to_canvas(&all_strokes, img_size);
+            
+            // Prepare flattened labels [max_total_strokes, 11]
+            let mut label_flat = vec![0.0f32; max_total_strokes * 11];
+            for (i, s) in all_strokes.iter().enumerate() {
+                if i >= max_total_strokes { break; }
+                let base = i * 11;
+                label_flat[base + 0] = s.p0.x / size_f;
+                label_flat[base + 1] = s.p0.y / size_f;
+                label_flat[base + 2] = s.p1.x / size_f;
+                label_flat[base + 3] = s.p1.y / size_f;
+                label_flat[base + 4] = s.p2.x / size_f;
+                label_flat[base + 5] = s.p2.y / size_f;
+                label_flat[base + 6] = s.p3.x / size_f;
+                label_flat[base + 7] = s.p3.y / size_f;
+                label_flat[base + 8] = s.w_start / 10.0;
+                label_flat[base + 9] = s.w_end / 10.0;
+                label_flat[base + 10] = 1.0; // Valid
+            }
+
+            (img_flat, label_flat)
+        })
+        .collect();
+
+    let mut images = Vec::with_capacity(batch_size * img_size * img_size);
+    let mut labels = Vec::with_capacity(batch_size * max_total_strokes * 11);
+
+    for (img, label) in results {
+        images.extend(img);
+        labels.extend(label);
+    }
+
+    let img_array = Array3::from_shape_vec((batch_size, img_size, img_size), images)
+        .map_err(|e: ShapeError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let label_array = Array3::from_shape_vec((batch_size, max_total_strokes, 11), labels)
+        .map_err(|e: ShapeError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    Ok((
+        img_array.into_pyarray_bound(py).unbind(),
+        label_array.into_pyarray_bound(py).unbind()
+    ))
+}
+
 /// Configures the global thread pool for Rayon.
 /// Should be called once at startup or inside worker initialization.
 /// If called more than once, it will return an error (Rayon limitation), 
@@ -623,6 +742,7 @@ fn ink_trace_rs(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_independent_strokes_batch, m)?)?;
     m.add_function(wrap_pyfunction!(generate_continuous_strokes_batch, m)?)?;
     m.add_function(wrap_pyfunction!(generate_multi_connected_strokes_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_multi_path_strokes_batch, m)?)?;
     m.add_function(wrap_pyfunction!(set_rayon_threads, m)?)?;
     Ok(())
 }

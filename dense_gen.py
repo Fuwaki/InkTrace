@@ -14,10 +14,16 @@ def generate_dense_maps(strokes, img_size=64):
     Returns:
         maps: dict containing:
             - 'skeleton': [H, W] (0/1)
-            - 'junction': [H, W] (0/1) note: Endpoints only for now
+            - 'junction': [H, W] (0/1) - All special points (endpoints + connections)
             - 'tangent':  [2, H, W] (cos2t, sin2t) - Double Angle Representation
             - 'width':    [H, W]
             - 'offset':   [2, H, W] (dx, dy)
+    
+    Note:
+        Junction map marks ALL P0 and P3 points of all strokes.
+        For continuous strokes, connection points (P3[i] == P0[i+1]) will also be marked.
+        The post-processing algorithm distinguishes endpoints vs connections by
+        analyzing the skeleton topology (neighbor count).
     """
     H, W = img_size, img_size
 
@@ -28,19 +34,12 @@ def generate_dense_maps(strokes, img_size=64):
     width = np.zeros((H, W), dtype=np.float32)
     offset = np.zeros((2, H, W), dtype=np.float32)
 
-    # Distance transform buffer (to keep closest point info if needed,
-    # but simple overwriting is usually fine for thin skeletons)
-    # Actually, if curves cross, we have a collision.
-    # For 'offset' and 'tangent', usually the top-most stroke (drawing order)
-    # or the one processed last wins.
-
     for s in strokes:
         # Check validity if 11th dim exists
         if s.shape[0] > 10 and s[10] < 0.5:
             continue
 
-        # Unpack control points
-        # Input is 0-1 normalized
+        # Unpack control points (0-1 normalized -> pixel coordinates)
         p0 = s[0:2] * img_size
         p1 = s[2:4] * img_size
         p2 = s[4:6] * img_size
@@ -49,23 +48,13 @@ def generate_dense_maps(strokes, img_size=64):
         w_start = s[8] * 10.0
         w_end = s[9] * 10.0
 
-        # 1. Junctions (Endpoints)
-        # We define junctions as the start/end of the stroke
-        # Draw small circle or single point
+        # 1. Junctions (mark ALL endpoints P0 and P3)
         for pt in [p0, p3]:
             px, py = int(np.round(pt[0])), int(np.round(pt[1]))
-            # Draw a slightly larger spot for junctions to allow easier detection?
-            # Or strict single pixel?
-            # Training is easier with 'splatted' gaussians, but hard masks are OK for Dice/focal loss.
-            # Let's verify bounds
             if 0 <= px < W and 0 <= py < H:
                 junction[py, px] = 1.0
-                # Optional: 3x3 block
-                # cv2.circle(junction, (px, py), 1, 1.0, -1)
 
         # 2. Skeleton & Attributes (Sampling)
-        # Estimate curve length roughly to determine steps
-        # L approx chord length P0-P3 + control net
         chord = np.linalg.norm(p3 - p0)
         cont_net = (
             np.linalg.norm(p1 - p0) + np.linalg.norm(p2 - p1) + np.linalg.norm(p3 - p2)
@@ -81,9 +70,6 @@ def generate_dense_maps(strokes, img_size=64):
         t_vals = np.linspace(0, 1, steps)
 
         # Vectorized Bezier evaluation
-        # B(t) = (1-t)^3 P0 + 3(1-t)^2 t P1 + 3(1-t)t^2 P2 + t^3 P3
-        # T(t) = 3(1-t)^2 (P1-P0) + 6(1-t)t (P2-P1) + 3t^2 (P3-P2)
-
         tm = 1.0 - t_vals
 
         # Coefficients [steps, 1]
@@ -101,15 +87,6 @@ def generate_dense_maps(strokes, img_size=64):
         d2 = (3 * (t_vals**2))[:, None]
 
         # Derivatives [steps, 2]
-        # B'(t) = d0*(P1-P0) + d1*(P2-P1) + d2*(P3-P2)
-        # Note: My manual derivation of coeffs above might be slightly loose formulation
-        # Real: d/dt (1-t)^3 = -3(1-t)^2
-        #       d/dt 3(1-t)^2 t = 3(1-t)^2 - 6(1-t)t
-        #       d/dt 3(1-t)t^2 = 6(1-t)t - 3t^2
-        #       d/dt t^3 = 3t^2
-        # Grouped by (Pi+1 - Pi):
-        #   3(1-t)^2 (P1-P0) + 6(1-t)t (P2-P1) + 3t^2 (P3-P2)
-        # This matches my code comment above, let's use that form.
         v10 = p1 - p0
         v21 = p2 - p1
         v32 = p3 - p2
@@ -118,54 +95,36 @@ def generate_dense_maps(strokes, img_size=64):
 
         # Normalize tangents
         norms = np.linalg.norm(derivs, axis=1, keepdims=True)
-        norms[norms < 1e-6] = 1.0  # Avoid div by zero
+        norms[norms < 1e-6] = 1.0
         tangents = derivs / norms
 
         # Convert to Double Angle representation (cos2t, sin2t)
-        # cos(2t) = cos^2(t) - sin^2(t) = ux^2 - uy^2
-        # sin(2t) = 2*sin(t)*cos(t) = 2*ux*uy
         ux = tangents[:, 0]
         uy = tangents[:, 1]
 
         cos2t = ux**2 - uy**2
         sin2t = 2 * ux * uy
 
-        # [steps, 2]
         tangents_double = np.stack([cos2t, sin2t], axis=1)
 
         # Widths
         widths = w_start + (w_end - w_start) * t_vals
 
         # Rasterize
-        # We iterate points and splat.
-        # Since we use dense steps, holes are unlikely.
         for i in range(steps):
             bx, by = pts[i]
-
-            # Integer coordinate (Center of pixel is ix, iy ? No, usually top-left is ix, iy)
-            # If we define pixel center at (ix+0.5, iy+0.5)
-            # Then ix = floor(bx).
             ix = int(np.floor(bx))
             iy = int(np.floor(by))
 
             if 0 <= ix < W and 0 <= iy < H:
-                # Skeleton mask
                 skeleton[iy, ix] = 1.0
-
-                # Tangent (Double Angle)
                 tangent[0, iy, ix] = tangents_double[i, 0]
                 tangent[1, iy, ix] = tangents_double[i, 1]
-
-                # Width
                 width[iy, ix] = widths[i]
 
                 # Offset: vector from pixel center to true point
-                # Pixel center = (ix + 0.5, iy + 0.5)
-                # offset = true - center
-                # Range roughly [-0.5, 0.5]
                 dex = bx - (ix + 0.5)
                 dey = by - (iy + 0.5)
-
                 offset[0, iy, ix] = dex
                 offset[1, iy, ix] = dey
 
@@ -191,12 +150,6 @@ def batch_generate_dense_maps(labels_batch, img_size=64):
         maps_list.append(m)
 
     # Stack into tensors
-    # skeleton: [B, 1, H, W]
-    # junction: [B, 1, H, W]
-    # tangent:  [B, 2, H, W]
-    # width:    [B, 1, H, W]
-    # offset:   [B, 2, H, W]
-
     res = {
         "skeleton": np.stack([m["skeleton"] for m in maps_list])[:, None, ...],
         "junction": np.stack([m["junction"] for m in maps_list])[:, None, ...],
