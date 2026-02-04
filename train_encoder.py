@@ -36,8 +36,7 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import matplotlib.pyplot as plt
 
-from encoder import StrokeEncoder
-from pixel_decoder import PixelDecoder, ReconstructionModel
+from models import ModelFactory
 from datasets import InkTraceDataset
 
 
@@ -289,17 +288,9 @@ def get_device(device_arg=None):
 
 def create_model(embed_dim, num_heads, num_layers, device):
     """创建模型"""
-    encoder = StrokeEncoder(
-        in_channels=1,
-        embed_dim=embed_dim,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout=0.1,
-    ).to(device)
-
-    pixel_decoder = PixelDecoder(embed_dim=embed_dim).to(device)
-
-    model = ReconstructionModel(encoder, pixel_decoder)
+    model = ModelFactory.create_reconstruction_model(
+        embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, device=device
+    )
     return model
 
 

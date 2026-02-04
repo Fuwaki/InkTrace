@@ -9,8 +9,8 @@ from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 
 # Import custom modules
-from encoder import StrokeEncoder
-from dense_models import DenseVectorNet, DenseLoss
+from models import ModelFactory
+from losses import DenseLoss
 from datasets import DenseInkTraceDataset, collate_dense_batch
 from visualize_dense import (
     visualize_prediction,
@@ -44,41 +44,9 @@ def train(args):
     print(f"Dataset initialized. Stage: {args.stage}")
 
     # 2. Model
-    encoder = StrokeEncoder(in_channels=1, embed_dim=128)
-
-    # Load Pretrained Encoder if needed
-    if args.encoder_ckpt:
-        print(f"Loading pretrained encoder from {args.encoder_ckpt}")
-        ckpt = torch.load(args.encoder_ckpt, map_location="cpu")
-
-        # Handle state dict keys
-        if "encoder_state_dict" in ckpt:
-            state_dict = ckpt["encoder_state_dict"]
-        elif "model_state_dict" in ckpt:
-            # Try to find encoder part if it's a full model
-            state_dict = {
-                k.replace("encoder.", ""): v
-                for k, v in ckpt["model_state_dict"].items()
-                if k.startswith("encoder.")
-            }
-            if not state_dict:
-                state_dict = ckpt["model_state_dict"]
-        else:
-            state_dict = ckpt
-
-        # 直接加载新架构权重 (需要先用 convert_checkpoint.py 转换旧权重)
-        msg = encoder.load_state_dict(state_dict, strict=False)
-        if msg.missing_keys or msg.unexpected_keys:
-            print(f"  Warning: Missing keys: {msg.missing_keys}")
-            print(f"  Warning: Unexpected keys: {msg.unexpected_keys}")
-            print("  如果看到 stem.* 相关的 unexpected keys，请先运行:")
-            print(
-                f"    python convert_checkpoint.py --input {args.encoder_ckpt} --output <new_path>"
-            )
-        else:
-            print("  Encoder weights loaded successfully.")
-
-    model = DenseVectorNet(encoder).to(device)
+    model = ModelFactory.create_dense_model(
+        embed_dim=128, device=device, encoder_ckpt=args.encoder_ckpt
+    )
 
     # Freeze Encoder if requested
     if args.freeze_encoder:
