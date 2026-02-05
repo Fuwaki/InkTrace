@@ -46,6 +46,7 @@ mod dense_maps_tests {
             Point::new(39.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -70,6 +71,7 @@ mod dense_maps_tests {
             Point::new(39.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -94,6 +96,7 @@ mod dense_maps_tests {
             Point::new(39.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -118,6 +121,7 @@ mod dense_maps_tests {
             Point::new(39.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -154,6 +158,7 @@ mod dense_maps_tests {
             Point::new(39.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -186,6 +191,7 @@ mod dense_maps_tests {
             Point::new(39.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -233,6 +239,7 @@ mod dense_maps_tests {
             Point::new(40.0, 30.0),
             Point::new(50.0, 50.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -272,6 +279,7 @@ mod dense_maps_tests {
                 Point::new(25.0, 10.0), // P3
                 2.0,
                 2.0,
+                2.0,
             ),
             CubicBezier::new(
                 Point::new(25.0, 10.0), // P0 = 上一个的 P3
@@ -280,12 +288,14 @@ mod dense_maps_tests {
                 Point::new(40.0, 15.0), // P3
                 2.0,
                 2.0,
+                2.0,
             ),
             CubicBezier::new(
                 Point::new(40.0, 15.0), // P0 = 上一个的 P3
                 Point::new(45.0, 25.0),
                 Point::new(50.0, 25.0),
                 Point::new(55.0, 20.0), // P3 - 终点
+                2.0,
                 2.0,
                 2.0,
             ),
@@ -326,6 +336,7 @@ mod dense_maps_tests {
                 Point::new(20.0, 10.0),
                 2.0,
                 2.0,
+                2.0,
             ),
             CubicBezier::new(
                 Point::new(25.0, 30.0), // 不连续，新起点
@@ -334,12 +345,14 @@ mod dense_maps_tests {
                 Point::new(40.0, 30.0),
                 2.0,
                 2.0,
+                2.0,
             ),
             CubicBezier::new(
                 Point::new(45.0, 50.0), // 不连续，新起点
                 Point::new(50.0, 55.0),
                 Point::new(55.0, 55.0),
                 Point::new(60.0, 50.0),
+                2.0,
                 2.0,
                 2.0,
             ),
@@ -377,6 +390,7 @@ mod dense_maps_tests {
             Point::new(39.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -564,6 +578,7 @@ mod dense_maps_tests {
             Point::new(44.0, 63.0),
             Point::new(63.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
@@ -571,6 +586,8 @@ mod dense_maps_tests {
         let maps = rasterizer.render(&[stroke], 64);
 
         // 应该不会 panic，且数据有效
+        // 注意：由于引入了 reject sampling，实际上 generate 模块不会生成这种笔画
+        // 但 rasterizer 本身应该能处理
         let skeleton_sum: f32 = maps.skeleton.iter().sum();
         assert!(skeleton_sum > 0.0, "Skeleton should not be empty");
 
@@ -588,6 +605,7 @@ mod dense_maps_tests {
             Point::new(32.5, 32.5),
             Point::new(33.0, 33.0),
             Point::new(33.5, 33.5),
+            2.0,
             2.0,
             2.0,
         );
@@ -609,6 +627,7 @@ mod dense_maps_tests {
             Point::new(27.0, 16.0),
             2.0,
             2.0,
+            2.0,
         );
 
         let rasterizer = Rasterizer::new();
@@ -622,6 +641,7 @@ mod dense_maps_tests {
                 Point::new(stroke.p2.x * scale, stroke.p2.y * scale),
                 Point::new(stroke.p3.x * scale, stroke.p3.y * scale),
                 stroke.w_start * scale,
+                stroke.w_mid * scale,
                 stroke.w_end * scale,
             );
 
@@ -655,6 +675,7 @@ mod dense_maps_tests {
             Point::new(25.0, 32.0),
             Point::new(40.0, 32.0),
             Point::new(55.0, 32.0),
+            2.0,
             2.0,
             2.0,
         );
@@ -702,6 +723,7 @@ mod dense_maps_tests {
             Point::new(32.0, 25.0),
             Point::new(32.0, 40.0),
             Point::new(32.0, 55.0),
+            2.0,
             2.0,
             2.0,
         );
@@ -753,6 +775,7 @@ mod dense_maps_tests {
             Point::new(40.0, 32.0),
             Point::new(55.0, 32.0),
             5.0, // 起点宽
+            3.0, // 中间
             1.0, // 终点窄
         );
 

@@ -142,7 +142,7 @@ graph TD
     *   `[B, 2, 64, 64]`, Sigmoid
     *   **架构**: 独立分支，集成 ASPP + CoordConv。
     *   **Channels**:
-        *   Ch0: **Topological Nodes** (端点、交叉点)。必须断开。
+        *   Ch0: **Topological Nodes** (端点)。必须断开。
         *   Ch1: **Geometric Anchors** (急转弯、拐点)。建议断开以优化拟合。
     *   **Loss**: **Gaussian Focal Loss** (Modified Focal Loss, CenterNet Style)。
         *   相比 MSE，Focal Loss 能更好地处理极度不平衡的正负样本。

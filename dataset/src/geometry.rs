@@ -179,12 +179,29 @@ pub struct CubicBezier {
     pub p2: Point,
     pub p3: Point,
     pub w_start: f32,
+    pub w_mid: f32,
     pub w_end: f32,
 }
 
 impl CubicBezier {
-    pub fn new(p0: Point, p1: Point, p2: Point, p3: Point, w_start: f32, w_end: f32) -> Self {
-        Self { p0, p1, p2, p3, w_start, w_end }
+    pub fn new(
+        p0: Point,
+        p1: Point,
+        p2: Point,
+        p3: Point,
+        w_start: f32,
+        w_mid: f32,
+        w_end: f32,
+    ) -> Self {
+        Self {
+            p0,
+            p1,
+            p2,
+            p3,
+            w_start,
+            w_mid,
+            w_end,
+        }
     }
 
     /// 评估曲线上 t 处的点 (t in [0, 1])
@@ -228,10 +245,12 @@ impl CubicBezier {
         self.eval_derivative(t).normalize()
     }
 
-    /// 评估曲线上 t 处的宽度
+    /// 评估曲线上 t 处的宽度 (二次贝塞尔插值)
+    /// w(t) = (1-t)²w_start + 2(1-t)tw_mid + t²w_end
     #[inline]
     pub fn eval_width(&self, t: f32) -> f32 {
-        self.w_start + (self.w_end - self.w_start) * t
+        let mt = 1.0 - t;
+        mt * mt * self.w_start + 2.0 * mt * t * self.w_mid + t * t * self.w_end
     }
 
     /// 估算曲线长度（弦长 + 控制多边形长度的平均）
@@ -297,9 +316,11 @@ mod tests {
             Point::new(0.33, 0.0),
             Point::new(0.66, 0.0),
             Point::new(1.0, 0.0),
-            1.0, 1.0
+            1.0,
+            1.0,
+            1.0,
         );
-        
+
         let mid = bezier.eval(0.5);
         assert!((mid.x - 0.5).abs() < 0.1);
         assert!((mid.y - 0.0).abs() < 0.1);

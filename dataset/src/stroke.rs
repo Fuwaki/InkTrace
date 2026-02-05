@@ -14,6 +14,8 @@ use std::f32::consts::PI;
 pub struct StrokeConfig {
     /// 画布大小
     pub canvas_size: f32,
+    /// 安全边距（防止笔画贴边或超出）
+    pub margin: f32,
     /// 笔画长度范围（相对于画布大小的比例）
     pub length_range: (f32, f32),
     /// 宽度范围
@@ -28,6 +30,7 @@ impl Default for StrokeConfig {
     fn default() -> Self {
         Self {
             canvas_size: 64.0,
+            margin: 4.0,
             length_range: (0.15, 0.4),
             width_range: (1.5, 4.5),
             handle_ratio_range: (0.25, 0.45),
@@ -99,56 +102,124 @@ pub fn generate_natural_segment<R: Rng>(
     rng: &mut R,
 ) -> CubicBezier {
     let size = config.canvas_size;
+    let margin = config.margin;
+    let max_retries = 10;
 
-    // 1. 确定大致方向（弦向量 P0 -> P3）
-    let chord_dir = if let Some(tan) = incoming_tangent {
-        // 延续前一段方向，但允许 ±60° 转弯
-        tan.rotate(rng.gen_range(-PI / 3.0..PI / 3.0))
-    } else {
-        // 随机起始方向
-        Point::from_angle(rng.gen_range(0.0..2.0 * PI))
-    }
-    .normalize();
+    // 确保起始点在安全区域内
+    let p0 = start_point.clamp(margin, size - margin);
 
-    // 2. 确定弦长
-    let len = size * rng.gen_range(config.length_range.0..config.length_range.1);
-    let p3 = &start_point + &(&chord_dir * len);
-
-    // 3. 确定控制点 P1（出发方向）
-    let p1_dir = if let Some(tan) = incoming_tangent {
-        // G1 连续：沿入射切向方向
-        tan.clone()
-    } else {
-        // 首段：略微偏离弦向
-        chord_dir.rotate(rng.gen_range(-config.direction_variation..config.direction_variation))
-    }
-    .normalize();
-
-    let h1_len = len * rng.gen_range(config.handle_ratio_range.0..config.handle_ratio_range.1);
-    let p1 = &start_point + &(&p1_dir * h1_len);
-
-    // 4. 确定控制点 P2（着陆方向，从 P3 反向）
-    let landing_dir = chord_dir
-        .rotate(rng.gen_range(-config.direction_variation..config.direction_variation))
+    // 尝试多次生成，直到找到完全在画布内的笔画
+    for _ in 0..max_retries {
+        // 1. 确定大致方向（弦向量 P0 -> P3）
+        let chord_dir = if let Some(tan) = incoming_tangent {
+            // 延续前一段方向，但允许 ±60° 转弯
+            tan.rotate(rng.gen_range(-PI / 3.0..PI / 3.0))
+        } else {
+            // 随机起始方向
+            Point::from_angle(rng.gen_range(0.0..2.0 * PI))
+        }
         .normalize();
-    let h2_len = len * rng.gen_range(config.handle_ratio_range.0..config.handle_ratio_range.1);
-    let p2 = &p3 - &(&landing_dir * h2_len);
 
-    // 5. 宽度
+        // 2. 确定弦长
+        let len = size * rng.gen_range(config.length_range.0..config.length_range.1);
+        let p3 = &p0 + &(&chord_dir * len);
+
+        // 检查 P3 是否在界内
+        if p3.x < margin || p3.x > size - margin || p3.y < margin || p3.y > size - margin {
+            continue;
+        }
+
+        // 3. 确定控制点 P1（出发方向）
+        let p1_dir = if let Some(tan) = incoming_tangent {
+            // G1 连续：沿入射切向方向
+            tan.clone()
+        } else {
+            // 首段：略微偏离弦向
+            chord_dir.rotate(rng.gen_range(-config.direction_variation..config.direction_variation))
+        }
+        .normalize();
+
+        let h1_len =
+            len * rng.gen_range(config.handle_ratio_range.0..config.handle_ratio_range.1);
+        let p1 = &p0 + &(&p1_dir * h1_len);
+
+        // 检查 P1 是否在界内
+        if p1.x < margin || p1.x > size - margin || p1.y < margin || p1.y > size - margin {
+            continue;
+        }
+
+        // 4. 确定控制点 P2（着陆方向，从 P3 反向）
+        let landing_dir = chord_dir
+            .rotate(rng.gen_range(-config.direction_variation..config.direction_variation))
+            .normalize();
+        let h2_len =
+            len * rng.gen_range(config.handle_ratio_range.0..config.handle_ratio_range.1);
+        let p2 = &p3 - &(&landing_dir * h2_len);
+
+        // 检查 P2 是否在界内
+        if p2.x < margin || p2.x > size - margin || p2.y < margin || p2.y > size - margin {
+            continue;
+        }
+
+        // 5. 宽度 (包含中间控制点，模仿顿挫感)
+        let w_start = rng.gen_range(config.width_range.0..config.width_range.1);
+        let w_end = rng.gen_range(config.width_range.0..config.width_range.1);
+        // w_mid 独立随机，允许宽度在中间变粗或变细
+        let w_mid = rng.gen_range(config.width_range.0..config.width_range.1);
+
+        // 找到有效笔画
+        return CubicBezier::new(p0, p1, p2, p3, w_start, w_mid, w_end);
+    }
+
+    // Fallback: 如果多次尝试失败，改用保守策略
+    // 与其 Clamp 导致其变成直线，不如尝试生成一个极短的、方向指向画布中心的“安全”笔画
+    // 或者直接生成一个小段，而不是原来的长笔画
+    
+    // 策略：指向画布中心
+    let center = Point::new(size / 2.0, size / 2.0);
+    let to_center = (&center - &p0).normalize();
+    
+    // 保守长度：取最小值，或者更小
+    let safe_len = size * config.length_range.0 * 0.5; 
+    
+    // 如果有入射切向，尽量顺着切向（除非切向指向画外）
+    // 这里简单处理：如果 fallback 被触发，说明情况很糟糕（比如卡在角落里切向又朝外）
+    // 这种情况下，为了保证鲁棒性，我们不仅要能在范围内，还要尽量保持连续性。
+    // 但如果必须二选一，保持在界内通常比 C1 连续更重要（训练数据不能有越界直线），
+    // 牺牲一点连续性（出现折角）比出现错误的 Dense 标注要好。
+    
+    // 重新计算 P3，这次指向中心方向（倾向于）
+    // 混合 切向 和 指向中心 的向量
+    let fallback_dir = if let Some(tan) = incoming_tangent {
+        // 如果切向指向界内，就用切向；否则强制指向中心
+        // 简单的判断：看 tan 和 to_center 的点积
+        if tan.dot(&to_center) > -0.2 { // 允许稍微背离中心，但不能完全背离
+             tan.clone()
+        } else {
+             // 强制转向中心
+             to_center
+        }
+    } else {
+        to_center
+    };
+
+    let p3 = &p0 + &(&fallback_dir * safe_len);
+    
+    // 简单的控制点插值
+    let p1 = p0.lerp(&p3, 0.33);
+    let p2 = p0.lerp(&p3, 0.66);
+
     let w_start = rng.gen_range(config.width_range.0..config.width_range.1);
     let w_end = rng.gen_range(config.width_range.0..config.width_range.1);
+    let w_mid = rng.gen_range(config.width_range.0..config.width_range.1);
 
-    // 6. 限制所有点在画布内
-    let mut bezier = CubicBezier::new(
-        start_point.clamp(0.0, size),
-        p1.clamp(0.0, size),
-        p2.clamp(0.0, size),
-        p3.clamp(0.0, size),
-        w_start,
-        w_end,
-    );
-    bezier.clamp_to_canvas(size);
-    bezier
+    // 理论上 p0 在界内，p3 向中心缩进，p1/p2 是插值，所以都在界内。
+    // 为了万无一失，还是 clamp 一下，但应该不会大幅移动点的位置导致变形。
+    let p1 = p1.clamp(margin, size - margin);
+    let p2 = p2.clamp(margin, size - margin);
+    let p3 = p3.clamp(margin, size - margin);
+
+    CubicBezier::new(p0, p1, p2, p3, w_start, w_mid, w_end)
 }
 
 /// 创建新的随机数生成器（使用操作系统熵源）

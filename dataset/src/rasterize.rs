@@ -86,20 +86,29 @@ impl DenseMaps {
     }
 
     /// 设置拓扑节点 (样条曲线的起点/终点) - Channel 0
+    /// 优先级：高。若该点已被标记为几何锚点，将被覆盖（清除几何锚点标记）。
     #[inline]
     pub fn set_topological_keypoint(&mut self, x: usize, y: usize) {
         if x < self.size && y < self.size {
-            let idx = self.idx2(0, x, y);
-            self.keypoints[idx] = 1.0;
+            let idx_topo = self.idx2(0, x, y);
+            let idx_geom = self.idx2(1, x, y);
+            self.keypoints[idx_topo] = 1.0;
+            self.keypoints[idx_geom] = 0.0; // 强制清除几何锚点，保证互斥
         }
     }
 
     /// 设置几何锚点 (多段贝塞尔曲线之间的连接点) - Channel 1
+    /// 优先级：低。若该点已被标记为拓扑节点，则忽略此标记。
     #[inline]
     pub fn set_geometric_keypoint(&mut self, x: usize, y: usize) {
         if x < self.size && y < self.size {
-            let idx = self.idx2(1, x, y);
-            self.keypoints[idx] = 1.0;
+            let idx_topo = self.idx2(0, x, y);
+            let idx_geom = self.idx2(1, x, y);
+
+            // 只有当不是拓扑节点时，才标记为几何锚点
+            if self.keypoints[idx_topo] == 0.0 {
+                self.keypoints[idx_geom] = 1.0;
+            }
         }
     }
 }
@@ -353,6 +362,7 @@ mod tests {
             Point::new(44.0, 44.0),
             Point::new(54.0, 32.0),
             3.0,
+            2.5,
             2.0,
         );
 
