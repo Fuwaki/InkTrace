@@ -175,7 +175,9 @@ class DenseTrainer(BaseTrainer):
 
         # 从 checkpoint 初始化
         if init_from:
-            state = self.load_checkpoint(init_from, load_optimizer=False)
+            state = self.load_checkpoint(
+                init_from, load_optimizer=False, strict=False
+            )
             # 验证配置匹配
             ckpt_embed_dim = state["config"].model.get("embed_dim", 128)
             if ckpt_embed_dim != config.model.get("embed_dim", 128):

@@ -205,6 +205,7 @@ class CheckpointManager:
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[optim.lr_scheduler._LRScheduler] = None,
         load_optimizer: bool = True,
+        strict: bool = True,
     ):
         """加载 checkpoint，自动恢复状态"""
 
@@ -216,7 +217,19 @@ class CheckpointManager:
             print(f"  Warning: checkpoint version {version} != 1")
 
         # 加载模型
-        model.load_state_dict(ckpt["model_state_dict"])
+        if strict:
+            model.load_state_dict(ckpt["model_state_dict"])
+        else:
+            incompatible = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+            if incompatible.missing_keys:
+                print(
+                    f"  Warning: Missing keys: {len(incompatible.missing_keys)} keys (expected for transfer learning)"
+                )
+            if incompatible.unexpected_keys:
+                print(
+                    f"  Warning: Unexpected keys: {len(incompatible.unexpected_keys)} keys"
+                )
+
         print(f"  Loaded model from: {ckpt_path}")
 
         # 加载 optimizer/scheduler
@@ -298,7 +311,9 @@ class BaseTrainer:
         else:
             return torch.device("cpu")
 
-    def load_checkpoint(self, ckpt_path: str, load_optimizer: bool = True):
+    def load_checkpoint(
+        self, ckpt_path: str, load_optimizer: bool = True, strict: bool = True
+    ):
         """加载 checkpoint"""
         state = self.ckpt_manager.load(
             ckpt_path,
@@ -306,6 +321,7 @@ class BaseTrainer:
             self.optimizer if load_optimizer else None,
             self.scheduler if load_optimizer else None,
             load_optimizer=load_optimizer,
+            strict=strict,
         )
         self.epoch = state["epoch"] + 1
         print(f"Resumed from epoch {self.epoch}")
