@@ -1,0 +1,88 @@
+# 默认配置文件 - 所有训练的超参数集中管理
+# 使用方法: python train.py --config configs/default.yaml
+
+model:
+  embed_dim: 128
+  num_layers: 4
+  full_heads: true  # false for structural pretrain
+
+training:
+  lr: 1e-3
+  batch_size: 32
+  epochs: 50
+  epoch_length: 10000
+  weight_decay: 1e-4
+  grad_clip: 1.0
+
+  # Scheduler
+  scheduler: "onecycle"  # or "cosine"
+  total_steps: null  # 自动计算
+
+  # Checkpoint
+  save_dir: "checkpoints"
+  save_interval: 5  # 每 N epoch 保存一次
+  keep_last_n: 3  # 保留最近 N 个 checkpoint
+
+  # Loss 权重
+  loss_weights:
+    skeleton: 10.0
+    keypoints: 5.0
+    tangent: 1.0
+    width: 1.0
+    offset: 1.0
+
+  # Curriculum Learning (渐进式训练)
+  # 启用后会自动从简单样本逐渐过渡到复杂样本
+  curriculum:
+    enabled: true
+    start_stage: 0       # 起始阶段 (0=单笔画)
+    end_stage: 6         # 结束阶段 (建议6, 更高阶段需要更长训练)
+    epochs_per_stage: 8  # 每个阶段训练多少个 epoch 后升级
+
+data:
+  img_size: 64
+  num_workers: 4
+  rust_threads: 4
+  curriculum_stage: 0  # 初始阶段 (如果 curriculum.enabled=true, 会自动递增)
+
+logging:
+  log_interval: 10  # 每 N step 记录一次
+  vis_interval: 2  # 每 N epoch 可视化一次
+  tensorboard_dir: "runs"
+
+device:
+  type: null  # null = auto detect (cuda/xpu/cpu)
+
+# 多阶段训练配置
+# Curriculum Stages 说明:
+#   Stage 0:   单笔画 (最简单)
+#   Stage 1-3: 多独立笔画 (递增: 1-3, 2-5, 3-8 笔画)
+#   Stage 4-6: 多段连续笔画 (递增: 2-3, 3-5, 4-8 段)
+#   Stage 7-9: 混合模式 (多条多段路径, 最复杂)
+stages:
+  - name: "structural"
+    epochs: 30
+    model:
+      full_heads: false
+    training:
+      lr: 1e-3
+      mask_ratio: 0.6
+      curriculum:
+        enabled: false  # 预训练阶段不使用渐进训练
+    data:
+      curriculum_stage: 2  # 使用稍复杂的数据
+
+  - name: "dense"
+    epochs: 60
+    init_from: "best_structural.pth"  # 自动从前一个阶段加载
+    model:
+      full_heads: true
+    training:
+      lr: 5e-4
+      curriculum:
+        enabled: true
+        start_stage: 0
+        end_stage: 6
+        epochs_per_stage: 10
+    data:
+      curriculum_stage: 0  # 从最简单开始
