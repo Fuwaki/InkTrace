@@ -14,7 +14,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from encoder import StrokeEncoder
 from decoder import UniversalDecoder
-from dense_heads import DenseHeads
 
 # =============================================================================
 # Masking Generator (for Structural Pretraining)

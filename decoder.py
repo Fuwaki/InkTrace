@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from RepVit import Conv2d_BN
+from dense_heads import DenseHeads
 
 
 # =============================================================================
@@ -128,18 +129,7 @@ class UniversalDecoder(nn.Module):
         self.conv3 = ConvBlock(64, 64)
 
         # ========== Prediction Heads ==========
-        self.shared_conv = nn.Sequential(Conv2d_BN(64, 64, 3, 1, 1), nn.GELU())
-
-        # Core heads (always present)
-        self.skeleton_head = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Sigmoid())
-        self.tangent_head = nn.Sequential(nn.Conv2d(64, 2, 1), nn.Tanh())
-
-        # Optional heads (for full dense prediction)
-        if full_heads:
-            # Keypoints: 2ch (Ch0=topo, Ch1=geo)
-            self.keypoints_head = nn.Sequential(nn.Conv2d(64, 2, 1), nn.Sigmoid())
-            self.width_head = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Softplus())
-            self.offset_conv = nn.Conv2d(64, 2, 1)
+        self.heads = DenseHeads(in_channels=64, head_channels=64, full_heads=full_heads)
 
         # Deep Supervision heads
         self.ds1_head = nn.Sequential(
@@ -194,17 +184,7 @@ class UniversalDecoder(nn.Module):
         d3 = self.conv3(d3_up)  # [B, 64, 64, 64]
 
         # ========== Prediction ==========
-        feat = self.shared_conv(d3)
-
-        outputs = {
-            "skeleton": self.skeleton_head(feat),
-            "tangent": self.tangent_head(feat),
-        }
-
-        if self.full_heads:
-            outputs["keypoints"] = self.keypoints_head(feat)
-            outputs["width"] = self.width_head(feat)
-            outputs["offset"] = torch.tanh(self.offset_conv(feat)) * 0.5
+        outputs = self.heads(d3)
 
         # Deep Supervision
         aux_outputs = {}

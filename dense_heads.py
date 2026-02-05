@@ -114,8 +114,9 @@ class DenseHeads(nn.Module):
         - 使用 CoordConv 提供精确位置（Encoder 的坐标信息经过多层已模糊）
     """
 
-    def __init__(self, in_channels, head_channels=64):
+    def __init__(self, in_channels, head_channels=64, full_heads=True):
         super().__init__()
+        self.full_heads = full_heads
 
         # ==========================================
         # Branch 1: Pixel Tasks (轻量级)
@@ -130,23 +131,24 @@ class DenseHeads(nn.Module):
         # 2. Tangent Field (2ch, Tanh) - cos2θ, sin2θ
         self.tangent = nn.Sequential(nn.Conv2d(head_channels, 2, 1), nn.Tanh())
 
-        # 3. Width Map (1ch, Softplus)
-        self.width = nn.Sequential(nn.Conv2d(head_channels, 1, 1), nn.Softplus())
+        if self.full_heads:
+            # 3. Width Map (1ch, Softplus)
+            self.width = nn.Sequential(nn.Conv2d(head_channels, 1, 1), nn.Softplus())
 
-        # 4. Offset Map (2ch, scaled Tanh)
-        self.offset_conv = nn.Conv2d(head_channels, 2, 1)
+            # 4. Offset Map (2ch, scaled Tanh)
+            self.offset_conv = nn.Conv2d(head_channels, 2, 1)
 
-        # ==========================================
-        # Branch 2: Geometric Tasks (ASPP + Coord)
-        # ==========================================
-        # Input: in_channels + 2 (X, Y coords)
-        # ASPP output: 32 channels (节省参数)
-        self.geo_aspp = ASPP(in_channels=in_channels + 2, out_channels=32)
+            # ==========================================
+            # Branch 2: Geometric Tasks (ASPP + Coord)
+            # ==========================================
+            # Input: in_channels + 2 (X, Y coords)
+            # ASPP output: 32 channels (节省参数)
+            self.geo_aspp = ASPP(in_channels=in_channels + 2, out_channels=32)
 
-        # 5. Keypoints Map (2ch, Sigmoid)
-        #    Ch0: Topological nodes (endpoints, junctions) - MUST break
-        #    Ch1: Geometric anchors (sharp turns, inflections) - SHOULD break
-        self.keypoints = nn.Sequential(nn.Conv2d(32, 2, 1), nn.Sigmoid())
+            # 5. Keypoints Map (2ch, Sigmoid)
+            #    Ch0: Topological nodes (endpoints, junctions) - MUST break
+            #    Ch1: Geometric anchors (sharp turns, inflections) - SHOULD break
+            self.keypoints = nn.Sequential(nn.Conv2d(32, 2, 1), nn.Sigmoid())
 
         self._init_weights()
 
@@ -162,38 +164,47 @@ class DenseHeads(nn.Module):
 
         out_skel = self.skeleton(feat_pixel)
         out_tan = self.tangent(feat_pixel)
-        out_width = self.width(feat_pixel)
-        out_offset = torch.tanh(self.offset_conv(feat_pixel)) * 0.5
 
-        # --- Branch 2: Geometric Tasks ---
-        B, _, H, W = x.shape
-
-        # 动态生成坐标网格 (不存储，节省显存)
-        y_grid = (
-            torch.linspace(-1, 1, H, device=x.device)
-            .view(1, 1, H, 1)
-            .expand(B, 1, H, W)
-        )
-        x_grid = (
-            torch.linspace(-1, 1, W, device=x.device)
-            .view(1, 1, 1, W)
-            .expand(B, 1, H, W)
-        )
-
-        # Concat: [B, 64+2, 64, 64]
-        x_geo = torch.cat([x, x_grid, y_grid], dim=1)
-
-        # ASPP + Keypoints
-        feat_geo = self.geo_aspp(x_geo)
-        out_keys = self.keypoints(feat_geo)
-
-        return {
+        outputs = {
             "skeleton": out_skel,
             "tangent": out_tan,
-            "width": out_width,
-            "offset": out_offset,
-            "keypoints": out_keys,  # [B, 2, H, W]
         }
+
+        if self.full_heads:
+            out_width = self.width(feat_pixel)
+            out_offset = torch.tanh(self.offset_conv(feat_pixel)) * 0.5
+
+            # --- Branch 2: Geometric Tasks ---
+            B, _, H, W = x.shape
+
+            # 动态生成坐标网格 (不存储，节省显存)
+            y_grid = (
+                torch.linspace(-1, 1, H, device=x.device)
+                .view(1, 1, H, 1)
+                .expand(B, 1, H, W)
+            )
+            x_grid = (
+                torch.linspace(-1, 1, W, device=x.device)
+                .view(1, 1, 1, W)
+                .expand(B, 1, H, W)
+            )
+
+            # Concat: [B, 64+2, 64, 64]
+            x_geo = torch.cat([x, x_grid, y_grid], dim=1)
+
+            # ASPP + Keypoints
+            feat_geo = self.geo_aspp(x_geo)
+            out_keys = self.keypoints(feat_geo)
+
+            outputs.update(
+                {
+                    "width": out_width,
+                    "offset": out_offset,
+                    "keypoints": out_keys,  # [B, 2, H, W]
+                }
+            )
+
+        return outputs
 
     def _init_weights(self):
         """
@@ -207,5 +218,5 @@ class DenseHeads(nn.Module):
             nn.init.constant_(self.skeleton[0].bias, -4.59)
 
         # Keypoints: Extremely sparse
-        if isinstance(self.keypoints[0], nn.Conv2d):
+        if self.full_heads and isinstance(self.keypoints[0], nn.Conv2d):
             nn.init.constant_(self.keypoints[0].bias, -4.59)
