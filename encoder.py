@@ -1,6 +1,39 @@
 import torch
 import torch.nn as nn
+import math
 from RepVit import RepViTBlock, Conv2d_BN, _make_divisible
+
+
+class AddCoords(nn.Module):
+    """
+    自动添加坐标通道
+    输入: [B, 1, H, W]
+    输出: [B, 3, H, W] (Gray + X_coord + Y_coord)
+    """
+
+    def __init__(self, with_r=False):
+        super().__init__()
+        self.with_r = with_r  # 是否添加半径 r (可选)
+
+    def forward(self, x):
+        B, _, H, W = x.shape
+
+        # 生成 -1 到 1 的线性网格
+        # align_corners=True 保证 -1 在最左/上，1 在最右/下
+        y_coords = (
+            torch.linspace(-1, 1, H, device=x.device)
+            .view(1, 1, H, 1)
+            .expand(B, 1, H, W)
+        )
+        x_coords = (
+            torch.linspace(-1, 1, W, device=x.device)
+            .view(1, 1, 1, W)
+            .expand(B, 1, H, W)
+        )
+
+        # 拼接到输入图像后面
+        ret = torch.cat([x, x_coords, y_coords], dim=1)
+        return ret
 
 
 class StrokeEncoder(nn.Module):
@@ -16,10 +49,15 @@ class StrokeEncoder(nn.Module):
     ):
         super().__init__()
 
-        # 1. 修改 RepViT 的 stem 层适配单通道输入
-        # Refactored for Multi-scale Feature Access
+        # --- 修改点 1: 引入坐标生成器 ---
+        self.add_coords = AddCoords()
+
+        # --- 修改点 2: Stem 接收 3 通道 (1 Gray + 1 X + 1 Y) ---
+        # 这样网络第一层就能感知绝对几何位置
+        input_channels_with_coords = in_channels + 2
+
         self.stem1 = nn.Sequential(
-            Conv2d_BN(in_channels, 32, 3, 2, 1),  # 1->32, 64x64 -> 32x32
+            Conv2d_BN(input_channels_with_coords, 32, 3, 2, 1),  # 3 -> 32
             nn.GELU(),
         )
         self.stem2 = nn.Sequential(
@@ -63,8 +101,12 @@ class StrokeEncoder(nn.Module):
         self.token_embed = nn.Linear(self.feature_dim, embed_dim)
 
         # 4. 位置编码
-        self.num_tokens = self.spatial_size * self.spatial_size  # 64
-        self.pos_embed = nn.Parameter(torch.randn(1, self.num_tokens, embed_dim) * 0.02)
+        # --- 修改点 3: 这里的 pos_embed 怎么处理？ ---
+        # 既然我们在 Stem 里已经加了 CoordConv，这里的 pos_embed 其实成了“第二道保险”。
+        # 建议保留，但初始化方式可以更科学一点（截断正态分布）
+        self.num_tokens = self.spatial_size * self.spatial_size
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
         # 5. Transformer Encoder (增加层数以充分利用 token)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -98,7 +140,11 @@ class StrokeEncoder(nn.Module):
         """
         B = x.shape[0]
 
-        # 1. Stem 层 (Split for F1, F2)
+        # --- 1. 注入坐标信息 ---
+        # x 变成了 [B, 3, 64, 64]
+        x = self.add_coords(x)
+
+        # 2. Stem 层 (Split for F1, F2)
         x = self.stem1(x)
         f1 = x  # [B, 32, 32, 32]
 

@@ -1,7 +1,5 @@
-# InkTrace V4 架构设计说明书：密集预测与图重建 (Dense Prediction & Graph Reconstruction)
+# InkTrace V5 架构设计说明书：密集预测与图重建 (Dense Prediction & Graph Reconstruction)
 
-**版本**: 1.2 (Final Paradigm)
-**日期**: 2026-01-29
 **关键词**: 密集预测 (Dense Prediction), 骨架提取 (Skeletonization), 图算法 (Graph Algorithms), 最小二乘拟合
 
 ---
@@ -100,11 +98,12 @@ graph TD
 
 ## 3. 详细模块设计 (Module Design)
 
-### 3.1 Encoder: Global Context Enhanced RepViT
+### 3.1 Encoder: Global Context Enhanced RepViT (Coordinate Aware)
 
 **功能**: 提取多尺度特征，并通过 Transformer 增强全局感受野。
 
-*   **Input**: `[B, 1, 64, 64]`
+*   **Input**: `[B, 1, 64, 64]` -> **Coordinate Injection** -> `[B, 3, 64, 64]` (Gray + X + Y)
+    *   *改进*: 引入 CoordConv 思想，显式注入归一化坐标 $(-1, 1)$，使卷积层具备绝对位置感知能力，提升对几何形状（如笔画端点、绝对位置）的敏感度。
 *   **Backbone**: Phase 1 RepViT (复用权重)。
 *   **Context Module**:
     *   Input: `[B, 64, 128]` (8x8 flattened)
