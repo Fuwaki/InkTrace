@@ -24,6 +24,7 @@
 """
 
 import argparse
+import math
 
 import torch
 import torch.optim as optim
@@ -74,9 +75,10 @@ class StructuralTrainer(BaseTrainer):
             lr=lr,
             weight_decay=weight_decay,
         )
-        total_steps = (
-            config.training["epoch_length"] // config.training["batch_size"]
-        ) * config.training["epochs"]
+        steps_per_epoch = math.ceil(
+            config.training["epoch_length"] / config.training["batch_size"]
+        )
+        total_steps = steps_per_epoch * config.training["epochs"]
         self.scheduler = optim.lr_scheduler.OneCycleLR(
             self.optimizer,
             max_lr=lr,
@@ -191,8 +193,8 @@ class DenseTrainer(BaseTrainer):
             lr=lr,
             weight_decay=weight_decay,
         )
-        steps_per_epoch = (
-            config.training["epoch_length"] // config.training["batch_size"]
+        steps_per_epoch = math.ceil(
+            config.training["epoch_length"] / config.training["batch_size"]
         )
         total_steps = steps_per_epoch * config.training["epochs"]
         self.scheduler = optim.lr_scheduler.OneCycleLR(

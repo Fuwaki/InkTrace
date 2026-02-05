@@ -41,8 +41,8 @@ training:
 
 data:
   img_size: 64
-  num_workers: 4
-  rust_threads: 4
+  num_workers: 10
+  rust_threads: 10
   curriculum_stage: 0  # 初始阶段 (如果 curriculum.enabled=true, 会自动递增)
 
 logging:
@@ -51,7 +51,7 @@ logging:
   tensorboard_dir: "runs"
 
 device:
-  type: cpu  # null = auto detect (cuda/xpu/cpu)
+  type: cuda  # null = auto detect (cuda/xpu/cpu)
 
 # 多阶段训练配置
 # Curriculum Stages 说明:
