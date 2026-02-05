@@ -9,10 +9,10 @@
 //! - Channel 0: 拓扑节点 - 样条曲线的起点/终点（必须断开）
 //! - Channel 1: 几何锚点 - 多段贝塞尔曲线之间的连接点（建议断开以改善拟合）
 
-mod generator;
-mod geometry;
-mod rasterize;
-mod stroke;
+pub mod generator;
+pub mod geometry;
+pub mod rasterize;
+pub mod stroke;
 
 #[cfg(test)]
 mod tests;
@@ -59,9 +59,8 @@ fn generate_dense_batch<'py>(
     let config = CurriculumConfig::from_stage(stage);
     let generator = DataGenerator::new();
 
-    // 并行生成
-    let samples = generator.generate_batch(&config, batch_size, img_size);
-    let output = BatchOutput::from_samples(samples, img_size);
+    // 并行生成 (使用优化后的 Zero-Copy 路径)
+    let output = generator.generate_batch_direct(&config, batch_size, img_size);
 
     // 转换为 numpy 数组
     let images = Array3::from_shape_vec((batch_size, img_size, img_size), output.images)

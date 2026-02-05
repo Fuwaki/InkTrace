@@ -229,6 +229,56 @@ impl DataGenerator {
         GeneratedSample { strokes, maps }
     }
 
+    /// 并行生成一批样本，直接填充到 BatchOutput (零拷贝，高性能)
+    pub fn generate_batch_direct(
+        &self,
+        config: &CurriculumConfig,
+        batch_size: usize,
+        img_size: usize,
+    ) -> BatchOutput {
+        let hw = img_size * img_size;
+        
+        // 预分配大块内存
+        let mut images = vec![0.0; batch_size * hw];
+        let mut skeletons = vec![0.0; batch_size * hw];
+        let mut keypoints = vec![0.0; batch_size * 2 * hw];
+        let mut tangents = vec![0.0; batch_size * 2 * hw];
+        let mut widths = vec![0.0; batch_size * hw];
+        let mut offsets = vec![0.0; batch_size * 2 * hw];
+
+        // 并行填充
+        images.par_chunks_exact_mut(hw)
+            .zip(skeletons.par_chunks_exact_mut(hw))
+            .zip(keypoints.par_chunks_exact_mut(2 * hw))
+            .zip(tangents.par_chunks_exact_mut(2 * hw))
+            .zip(widths.par_chunks_exact_mut(hw))
+            .zip(offsets.par_chunks_exact_mut(2 * hw))
+            .for_each(|(((((img_slice, skel_slice), kp_slice), tan_slice), w_slice), off_slice)| {
+                // 每个线程独立的 RNG
+                let mut rng = new_rng();
+                let sample = self.generate_sample(config, img_size, &mut rng);
+                
+                // 直接内存拷贝
+                img_slice.copy_from_slice(&sample.maps.image);
+                skel_slice.copy_from_slice(&sample.maps.skeleton);
+                kp_slice.copy_from_slice(&sample.maps.keypoints);
+                tan_slice.copy_from_slice(&sample.maps.tangent);
+                w_slice.copy_from_slice(&sample.maps.width);
+                off_slice.copy_from_slice(&sample.maps.offset);
+            });
+
+        BatchOutput {
+            batch_size,
+            img_size,
+            images,
+            skeletons,
+            keypoints,
+            tangents,
+            widths,
+            offsets,
+        }
+    }
+
     /// 并行生成一批样本
     ///
     /// 每个并行任务都会使用 StdRng::from_entropy() 创建新的 RNG，
