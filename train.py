@@ -173,10 +173,10 @@ class DenseTrainer(BaseTrainer):
             device=self.device,
         )
 
-        # 从 checkpoint 初始化
+        # 从 checkpoint 初始化 (迁移学习)
         if init_from:
             state = self.load_checkpoint(
-                init_from, load_optimizer=False, strict=False
+                init_from, load_optimizer=False, strict=False, reset_epoch=True
             )
             # 验证配置匹配
             ckpt_embed_dim = state["config"].model.get("embed_dim", 128)
@@ -311,8 +311,8 @@ class DenseTrainer(BaseTrainer):
         metrics = self.visualizer.visualize(
             model=self.model,
             dataloader=self.dataloader,
-            epoch=self.epoch,
-            tag="Dense/Visualization",
+            global_step=self.global_step,
+            prefix="Dense",
         )
 
         # 打印指标

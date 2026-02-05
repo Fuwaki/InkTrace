@@ -189,9 +189,7 @@ class CheckpointManager:
         """清理旧 checkpoint，保留最近 N 个"""
         if len(self.saved_checkpoints) > self.keep_last_n:
             # 排序并删除最旧的
-            self.saved_checkpoints.sort(
-                key=lambda p: int(p.stem.split("epoch")[1])
-            )
+            self.saved_checkpoints.sort(key=lambda p: int(p.stem.split("epoch")[1]))
             for old_ckpt in self.saved_checkpoints[: -self.keep_last_n]:
                 if old_ckpt.exists():
                     old_ckpt.unlink()
@@ -282,7 +280,10 @@ class BaseTrainer:
 
         # TensorBoard
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = Path(config.logging.get("tensorboard_dir", "runs")) / f"{stage_name}_{timestamp}"
+        log_dir = (
+            Path(config.logging.get("tensorboard_dir", "runs"))
+            / f"{stage_name}_{timestamp}"
+        )
         self.writer = SummaryWriter(log_dir=str(log_dir))
         print(f"TensorBoard: {log_dir}")
 
@@ -312,9 +313,20 @@ class BaseTrainer:
             return torch.device("cpu")
 
     def load_checkpoint(
-        self, ckpt_path: str, load_optimizer: bool = True, strict: bool = True
+        self,
+        ckpt_path: str,
+        load_optimizer: bool = True,
+        strict: bool = True,
+        reset_epoch: bool = False,
     ):
-        """加载 checkpoint"""
+        """加载 checkpoint
+        
+        Args:
+            ckpt_path: checkpoint 路径
+            load_optimizer: 是否加载优化器状态
+            strict: 是否严格匹配 state_dict
+            reset_epoch: 是否重置 epoch 为 0 (用于迁移学习)
+        """
         state = self.ckpt_manager.load(
             ckpt_path,
             self.model,
@@ -323,8 +335,12 @@ class BaseTrainer:
             load_optimizer=load_optimizer,
             strict=strict,
         )
-        self.epoch = state["epoch"] + 1
-        print(f"Resumed from epoch {self.epoch}")
+        if reset_epoch:
+            self.epoch = 0
+            print(f"  Loaded weights (epoch reset to 0 for transfer learning)")
+        else:
+            self.epoch = state["epoch"] + 1
+            print(f"Resumed from epoch {self.epoch}")
         return state
 
     def train(self, dataloader):
@@ -336,7 +352,9 @@ class BaseTrainer:
             epoch_losses = {}
             step_cnt = 0
 
-            pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{self.config.training['epochs']}")
+            pbar = tqdm(
+                dataloader, desc=f"Epoch {epoch + 1}/{self.config.training['epochs']}"
+            )
 
             for batch in pbar:
                 # 单步训练
@@ -353,7 +371,9 @@ class BaseTrainer:
                 # 日志
                 if self.global_step % self.config.logging.get("log_interval", 10) == 0:
                     for key, value in losses.items():
-                        self.writer.add_scalar(f"Loss/step_{key}", value, self.global_step)
+                        self.writer.add_scalar(
+                            f"Loss/step_{key}", value, self.global_step
+                        )
                     self.writer.add_scalar(
                         "LR", self.optimizer.param_groups[0]["lr"], self.global_step
                     )
@@ -374,7 +394,9 @@ class BaseTrainer:
         for key, value in avg_losses.items():
             self.writer.add_scalar(f"Loss/epoch_{key}", value, epoch)
 
-        print(f"Epoch {epoch + 1} finished. Avg Loss: {avg_losses.get('total', list(avg_losses.values())[0]):.4f}")
+        print(
+            f"Epoch {epoch + 1} finished. Avg Loss: {avg_losses.get('total', list(avg_losses.values())[0]):.4f}"
+        )
 
         # 保存 checkpoint
         metric = avg_losses.get("total", list(avg_losses.values())[0])
