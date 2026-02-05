@@ -144,7 +144,10 @@ graph TD
     *   **Channels**:
         *   Ch0: **Topological Nodes** (端点、交叉点)。必须断开。
         *   Ch1: **Geometric Anchors** (急转弯、拐点)。建议断开以优化拟合。
-    *   Loss: MSE (Gaussian Heatmap GT)。
+    *   **Loss**: **Gaussian Focal Loss** (Modified Focal Loss, CenterNet Style)。
+        *   相比 MSE，Focal Loss 能更好地处理极度不平衡的正负样本。
+        *   利用高斯核生成 Soft GT ($\sigma \approx 1.5$)，而非 One-hot GT，避免梯度过陡。
+    *   **Inference**: 需要进行 3x3 MaxPool **NMS (非极大值抑制)** 提取局部极值点。
 
 3.  **Tangent Field (切向场)**
     *   `[B, 2, 64, 64]`, Tanh

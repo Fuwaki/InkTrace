@@ -148,6 +148,9 @@ class DenseHeads(nn.Module):
             # 5. Keypoints Map (2ch, Sigmoid)
             #    Ch0: Topological nodes (endpoints, junctions) - MUST break
             #    Ch1: Geometric anchors (sharp turns, inflections) - SHOULD break
+            #    Note: Output is Sigmoid for Gaussian Focal Loss compatibility
+            #    训练时用 Gaussian heatmap GT + Focal Loss
+            #    推理时用 NMS 提取离散点
             self.keypoints = nn.Sequential(nn.Conv2d(32, 2, 1), nn.Sigmoid())
 
         self._init_weights()
