@@ -411,7 +411,8 @@ def run_single_stage(args, config: Config, stage_name: str, init_from: str = Non
             logging={**config.logging, **stage_config.get("logging", {})},
             device=config.device,
         )
-        init_from = stage_config.get("init_from", init_from)
+        if init_from is None:
+            init_from = stage_config.get("init_from")
 
     # 创建 trainer
     if stage_name == "structural":
