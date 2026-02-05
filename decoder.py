@@ -53,29 +53,62 @@ class AttentionGate(nn.Module):
         return x * psi
 
 
-class ConvBlock(nn.Module):
+
+
+
+class NeXtBlock(nn.Module):
     """
-    Standard Conv Block: Conv-BN-ReLU-Conv-BN-ReLU
-    Using RepVGG style Conv2d_BN for efficiency if desired, but standard ResBlock is good.
-    Here we use a simple residual block.
+    ConvNeXt Style Block for Decoder.
+    特点: 7x7 Depthwise Conv + Inverted Bottleneck (1x1 Conv)
+    优势: 比普通 3x3 ResBlock 感受野更大，计算量更小，适合捕捉长笔画结构。
     """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, expand_ratio=2, kernel_size=7):
         super().__init__()
-        self.conv1 = Conv2d_BN(in_channels, out_channels, 3, 1, 1)
-        self.act = nn.GELU()
-        self.conv2 = Conv2d_BN(out_channels, out_channels, 3, 1, 1)
-
+        # Ensure input fits output dimension if needed for residual connection
         self.shortcut = nn.Identity()
         if in_channels != out_channels:
             self.shortcut = Conv2d_BN(in_channels, out_channels, 1, 1, 0)
 
+        # 1. Depthwise Conv: Large Kernel (7x7), Spatial mixing
+        # We assume input has been projected to 'out_channels' dimension or we handle it inside.
+        # Here we follow a design where we match dimensions first if needed,
+        # but to keep it clean, let's process 'in_channels' -> 'out_channels' at the start if needed.
+
+        # However, standard ConvNeXt keeps dims constant.
+        # Let's do a preliminary projection if in != out, similar to the shortcut.
+        self.pre_proj = nn.Identity()
+        current_dim = in_channels
+        if in_channels != out_channels:
+            self.pre_proj = Conv2d_BN(in_channels, out_channels, 1, 1, 0)
+            current_dim = out_channels
+
+        # Now standard ConvNeXt block
+        self.dwconv = Conv2d_BN(
+            current_dim,
+            current_dim,
+            kernel_size,
+            stride=1,
+            pad=kernel_size // 2,
+            groups=current_dim,
+        )
+
+        hidden_dim = int(current_dim * expand_ratio)
+        self.pwconv1 = Conv2d_BN(current_dim, hidden_dim, 1, 1, 0)
+        self.act = nn.GELU()
+        self.pwconv2 = Conv2d_BN(hidden_dim, current_dim, 1, 1, 0)
+
     def forward(self, x):
+        # Shortcut uses original input
         res = self.shortcut(x)
-        x = self.conv1(x)
+
+        # Main path
+        x = self.pre_proj(x)
+        x = self.dwconv(x)
+        x = self.pwconv1(x)
         x = self.act(x)
-        x = self.conv2(x)
-        x = self.act(x)
+        x = self.pwconv2(x)
+
         return x + res
 
 
@@ -114,19 +147,37 @@ class UniversalDecoder(nn.Module):
         self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
         # Attention Gate for skip connection (only used when use_skips=True)
         self.ag1 = AttentionGate(F_g=128, F_l=128, F_int=64)
-        # Two versions of conv: with skip (256 in) vs without skip (128 in)
-        self.conv1_skip = ConvBlock(128 + 128, 128)
-        self.conv1_noskip = ConvBlock(128, 128)
+
+        # [Refactor] Explicit Fusion + Shared Processor
+        # Fusion: Merge skip connection (if any) to 128 channels
+        self.fusion1_skip = nn.Sequential(
+            nn.Conv2d(128 + 128, 128, 1, bias=False), nn.BatchNorm2d(128)
+        )
+        self.fusion1_noskip = nn.Identity()  # 128 -> 128 identity
+
+        # Shared Block: NeXtBlock (7x7) to process the fused features
+        # Crucial: Weights are shared between skip/noskip modes
+        self.conv1_shared = NeXtBlock(128, 128, kernel_size=7)
 
         # ========== Layer 2: 16x16 -> 32x32 ==========
         self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
         self.ag2 = AttentionGate(F_g=128, F_l=32, F_int=16)
-        self.conv2_skip = ConvBlock(128 + 32, 64)
-        self.conv2_noskip = ConvBlock(128, 64)
+
+        # Fusion: 128+32 -> 64
+        self.fusion2_skip = nn.Sequential(
+            nn.Conv2d(128 + 32, 64, 1, bias=False), nn.BatchNorm2d(64)
+        )
+        # Fusion: 128 -> 64
+        self.fusion2_noskip = nn.Sequential(
+            nn.Conv2d(128, 64, 1, bias=False), nn.BatchNorm2d(64)
+        )
+
+        # Shared Block
+        self.conv2_shared = NeXtBlock(64, 64, kernel_size=7)
 
         # ========== Layer 3: 32x32 -> 64x64 ==========
         self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.conv3 = ConvBlock(64, 64)
+        self.conv3 = NeXtBlock(64, 64, kernel_size=7)
 
         # ========== Prediction Heads ==========
         self.heads = DenseHeads(in_channels=64, head_channels=64, full_heads=full_heads)
@@ -165,19 +216,21 @@ class UniversalDecoder(nn.Module):
         d1_up = self.up1(f3)  # [B, 128, 16, 16]
         if use_skips and f2 is not None:
             f2_gated = self.ag1(d1_up, f2)
-            d1 = torch.cat([d1_up, f2_gated], dim=1)
-            d1 = self.conv1_skip(d1)
+            d1_fused = self.fusion1_skip(torch.cat([d1_up, f2_gated], dim=1))
         else:
-            d1 = self.conv1_noskip(d1_up)
+            d1_fused = self.fusion1_noskip(d1_up)
+
+        d1 = self.conv1_shared(d1_fused)
 
         # ========== Block 2 (16 -> 32) ==========
         d2_up = self.up2(d1)  # [B, 128, 32, 32]
         if use_skips and f1 is not None:
             f1_gated = self.ag2(d2_up, f1)
-            d2 = torch.cat([d2_up, f1_gated], dim=1)
-            d2 = self.conv2_skip(d2)
+            d2_fused = self.fusion2_skip(torch.cat([d2_up, f1_gated], dim=1))
         else:
-            d2 = self.conv2_noskip(d2_up)
+            d2_fused = self.fusion2_noskip(d2_up)
+
+        d2 = self.conv2_shared(d2_fused)
 
         # ========== Block 3 (32 -> 64) ==========
         d3_up = self.up3(d2)
