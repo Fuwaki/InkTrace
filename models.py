@@ -213,11 +213,7 @@ class UnifiedModel(nn.Module):
             # 但我们会告诉 decoder 忽略 f1, f2
 
         # 2. Decoder Pass
-        outputs, aux_outputs = self.decoder(features, use_skips=use_skips)
-
-        # 3. Merge aux outputs if training
-        if self.training:
-            outputs.update(aux_outputs)
+        outputs = self.decoder(features, use_skips=use_skips)
 
         return outputs
 

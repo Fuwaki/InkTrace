@@ -191,7 +191,6 @@ class DenseLoss(nn.Module):
             "tangent": 1.0,
             "width": 1.0,
             "offset": 1.0,
-            "aux": 0.5,  # Weight for deep supervision
         }
 
     def _dice_loss(self, pred, target, smooth=1.0):
@@ -267,25 +266,6 @@ class DenseLoss(nn.Module):
         l1_off = torch.abs(pred_off - tgt_off)
         l1_off = (l1_off * mask.unsqueeze(1)).sum() / num_fg / 2.0
         losses["loss_off"] = self.weights["offset"] * l1_off
-
-        # 6. Aux Losses (Skeleton only)
-        if "aux_skeleton_16" in outputs:
-            # Downsample target
-            tgt_16 = F.interpolate(tgt_skel, size=16, mode="bilinear")
-            tgt_16 = (tgt_16 > 0.5).float()  # Binarize
-
-            aux_pred = outputs["aux_skeleton_16"]
-            aux_loss = self._safe_bce(aux_pred, tgt_16)
-            losses["loss_aux_16"] = self.weights["aux"] * aux_loss
-
-        if "aux_skeleton_32" in outputs:
-            # Downsample target
-            tgt_32 = F.interpolate(tgt_skel, size=32, mode="bilinear")
-            tgt_32 = (tgt_32 > 0.5).float()
-
-            aux_pred = outputs["aux_skeleton_32"]
-            aux_loss = self._safe_bce(aux_pred, tgt_32)
-            losses["loss_aux_32"] = self.weights["aux"] * aux_loss
 
         losses["total"] = sum(losses.values())
         return losses

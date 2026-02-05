@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from RepVit import Conv2d_BN
 from dense_heads import DenseHeads
 
@@ -9,52 +10,104 @@ from dense_heads import DenseHeads
 # =============================================================================
 
 
-class AttentionGate(nn.Module):
+class GroundingBlock(nn.Module):
     """
-    Attention Gate: Filter features from skip connection using signal from current decoder layer.
+    Grounding Transformer Block (Inspired by FPT, ECCV 2020)
+
+    Uses high-level semantics (Query from Decoder) to search and refine
+    low-level details (Key/Value from Encoder skip connection).
+
+    与 AttentionGate 的区别:
+    - AG: 只是"过滤器"，抑制无关区域
+    - Grounding: "搜索引擎"，主动在 Encoder 特征中查找相关细节
+
+    对于墨迹重建任务:
+    - Decoder 发出查询: "我需要恢复这里的横折钩细节"
+    - Encoder 提供资源: 边缘纹理、转角特征等
+    - Attention 计算相关度，精准抓取匹配的细节
     """
 
-    def __init__(self, F_g, F_l, F_int):
+    def __init__(self, dim_high, dim_low, num_heads=4, ffn_expand=2):
         """
         Args:
-            F_g: Gate channels (from deeper layer)
-            F_l: Skip connection channels (from shallower layer)
-            F_int: Intermediate channels
+            dim_high: Decoder feature channels (Query source)
+            dim_low:  Encoder skip feature channels (Key/Value source, also output dim)
+            num_heads: Number of attention heads
+            ffn_expand: FFN expansion ratio
         """
-        super(AttentionGate, self).__init__()
-        self.W_g = nn.Sequential(
-            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int),
+        super().__init__()
+        self.dim_low = dim_low
+        self.num_heads = num_heads
+        self.head_dim = dim_low // num_heads
+        self.scale = self.head_dim**-0.5
+
+        assert dim_low % num_heads == 0, f"dim_low ({dim_low}) must be divisible by num_heads ({num_heads})"
+
+        # Layer Norms (Transformer style, stabilizes training)
+        self.norm_high = nn.GroupNorm(1, dim_high)  # Instance Norm equivalent
+        self.norm_low = nn.GroupNorm(1, dim_low)
+
+        # Linear projections
+        # Q comes from Decoder (High level) -> project to dim_low
+        self.to_q = nn.Conv2d(dim_high, dim_low, 1, bias=False)
+        # K, V come from Encoder (Low level)
+        self.to_k = nn.Conv2d(dim_low, dim_low, 1, bias=False)
+        self.to_v = nn.Conv2d(dim_low, dim_low, 1, bias=False)
+
+        # Output projection
+        self.proj = nn.Conv2d(dim_low, dim_low, 1, bias=False)
+
+        # Lightweight FFN for enhanced expressiveness
+        self.ffn = nn.Sequential(
+            nn.Conv2d(dim_low, dim_low * ffn_expand, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(dim_low * ffn_expand, dim_low, 1, bias=False),
         )
+        self.norm_ffn = nn.GroupNorm(1, dim_low)
 
-        self.W_x = nn.Sequential(
-            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int),
-        )
+        # Gating parameter (Init as 0 to start with pure skip, gradual warmup)
+        self.gamma_attn = nn.Parameter(torch.zeros(1))
+        self.gamma_ffn = nn.Parameter(torch.zeros(1))
 
-        self.psi = nn.Sequential(
-            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(1),
-            nn.Sigmoid(),
-        )
-
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, g, x):
+    def forward(self, high_feature, low_feature):
         """
-        g: Gate signal (Upsampled feature from prev decoder layer)
-        x: Skip connection feature (from Encoder)
+        Args:
+            high_feature: [B, C_high, H, W] (Decoder / Query)
+            low_feature:  [B, C_low,  H, W] (Encoder / Key, Value)
+        Returns:
+            Refined low_feature with semantic alignment
         """
-        g1 = self.W_g(g)
-        x1 = self.W_x(x)
-        psi = self.relu(g1 + x1)
-        psi = self.psi(psi)
+        B, _, H, W = low_feature.shape
+        N = H * W
 
-        return x * psi
+        # Normalize inputs
+        high_norm = self.norm_high(high_feature)
+        low_norm = self.norm_low(low_feature)
 
+        # 1. Projections -> [B, heads, N, head_dim]
+        q = self.to_q(high_norm).view(B, self.num_heads, self.head_dim, N).permute(0, 1, 3, 2)
+        k = self.to_k(low_norm).view(B, self.num_heads, self.head_dim, N)  # [B, heads, head_dim, N]
+        v = self.to_v(low_norm).view(B, self.num_heads, self.head_dim, N).permute(0, 1, 3, 2)
 
+        # 2. Cross Attention: Q @ K^T
+        # Query (high-level) searches in Key (low-level details)
+        attn = (q @ k) * self.scale  # [B, heads, N, N]
+        attn = attn.softmax(dim=-1)
 
+        # 3. Aggregation: Attn @ V
+        out = (attn @ v)  # [B, heads, N, head_dim]
+        out = out.permute(0, 1, 3, 2).reshape(B, self.dim_low, H, W)
 
+        # 4. Output projection
+        out = self.proj(out)
+
+        # 5. Residual with learnable gate (attention path)
+        x = low_feature + self.gamma_attn * out
+
+        # 6. FFN with residual (enhances local processing after global attention)
+        x = x + self.gamma_ffn * self.ffn(self.norm_ffn(x))
+
+        return x
 
 class NeXtBlock(nn.Module):
     """
@@ -126,6 +179,11 @@ class UniversalDecoder(nn.Module):
     - use_skips=True (正式训练模式):
         使用 f1, f2 跳连，提高细节精度
 
+    Skip Connection 策略:
+    - 使用 GroundingBlock (Cross-Attention) 替代简单的 AttentionGate
+    - Decoder 特征作为 Query，在 Encoder 特征中"搜索"相关细节
+    - 实现语义对齐，而非简单的门控过滤
+
     输出头：skeleton, tangent (预训练核心), junction, width, offset (可选)
     """
 
@@ -145,8 +203,9 @@ class UniversalDecoder(nn.Module):
 
         # ========== Layer 1: 8x8 -> 16x16 ==========
         self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        # Attention Gate for skip connection (only used when use_skips=True)
-        self.ag1 = AttentionGate(F_g=128, F_l=128, F_int=64)
+        # Grounding Block: Cross-Attention for semantic alignment
+        # dim_high=128 (Decoder), dim_low=128 (Encoder F2)
+        self.grounding1 = GroundingBlock(dim_high=128, dim_low=128, num_heads=4)
 
         # [Refactor] Explicit Fusion + Shared Processor
         # Fusion: Merge skip connection (if any) to 128 channels
@@ -161,7 +220,8 @@ class UniversalDecoder(nn.Module):
 
         # ========== Layer 2: 16x16 -> 32x32 ==========
         self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.ag2 = AttentionGate(F_g=128, F_l=32, F_int=16)
+        # Grounding Block: dim_high=128 (Decoder), dim_low=32 (Encoder F1)
+        self.grounding2 = GroundingBlock(dim_high=128, dim_low=32, num_heads=4)
 
         # Fusion: 128+32 -> 64
         self.fusion2_skip = nn.Sequential(
@@ -181,14 +241,6 @@ class UniversalDecoder(nn.Module):
 
         # ========== Prediction Heads ==========
         self.heads = DenseHeads(in_channels=64, head_channels=64, full_heads=full_heads)
-
-        # Deep Supervision heads
-        self.ds1_head = nn.Sequential(
-            Conv2d_BN(128, 32, 3, 1, 1), nn.GELU(), nn.Conv2d(32, 1, 1)
-        )
-        self.ds2_head = nn.Sequential(
-            Conv2d_BN(64, 32, 3, 1, 1), nn.GELU(), nn.Conv2d(32, 1, 1)
-        )
 
     def forward(self, features, use_skips=True):
         """
@@ -215,8 +267,9 @@ class UniversalDecoder(nn.Module):
         # ========== Block 1 (8 -> 16) ==========
         d1_up = self.up1(f3)  # [B, 128, 16, 16]
         if use_skips and f2 is not None:
-            f2_gated = self.ag1(d1_up, f2)
-            d1_fused = self.fusion1_skip(torch.cat([d1_up, f2_gated], dim=1))
+            # Grounding: Decoder queries Encoder for relevant details
+            f2_grounded = self.grounding1(d1_up, f2)
+            d1_fused = self.fusion1_skip(torch.cat([d1_up, f2_grounded], dim=1))
         else:
             d1_fused = self.fusion1_noskip(d1_up)
 
@@ -225,8 +278,9 @@ class UniversalDecoder(nn.Module):
         # ========== Block 2 (16 -> 32) ==========
         d2_up = self.up2(d1)  # [B, 128, 32, 32]
         if use_skips and f1 is not None:
-            f1_gated = self.ag2(d2_up, f1)
-            d2_fused = self.fusion2_skip(torch.cat([d2_up, f1_gated], dim=1))
+            # Grounding: Decoder queries Encoder for fine details
+            f1_grounded = self.grounding2(d2_up, f1)
+            d2_fused = self.fusion2_skip(torch.cat([d2_up, f1_grounded], dim=1))
         else:
             d2_fused = self.fusion2_noskip(d2_up)
 
@@ -239,10 +293,4 @@ class UniversalDecoder(nn.Module):
         # ========== Prediction ==========
         outputs = self.heads(d3)
 
-        # Deep Supervision
-        aux_outputs = {}
-        if self.training:
-            aux_outputs["aux_skeleton_16"] = torch.sigmoid(self.ds1_head(d1))
-            aux_outputs["aux_skeleton_32"] = torch.sigmoid(self.ds2_head(d2))
-
-        return outputs, aux_outputs
+        return outputs
