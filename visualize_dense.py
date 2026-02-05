@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Dense Prediction 模型可视化与评估工具
+Dense Prediction 模型可视化与评估工具 (V2)
 
 功能：
-1. 从 checkpoint 加载 DenseVectorModel 模型
-2. 在测试数据上可视化预测结果 (Skeleton, Junction, Tangent, Width, Offset)
+1. 从 checkpoint 加载模型 (通过 ModelFactory)
+2. 在测试数据上可视化预测结果 (Skeleton, Keypoints, Tangent, Width, Offset)
 3. 计算评估指标 (IoU, Precision, Recall, F1)
+4. 提供 DenseVisualizer 类用于 TensorBoard 集成
 
 使用方法:
     # 可视化单个 checkpoint
@@ -29,9 +30,8 @@ from PIL import Image
 import torch
 from torch.utils.data import DataLoader
 
-from encoder import StrokeEncoder
-from models import DenseVectorModel
-from datasets import DenseInkTraceDataset, collate_dense_batch
+from models import ModelFactory
+from datasets_v2 import DenseInkTraceDataset
 
 
 # =============================================================================
@@ -42,7 +42,7 @@ from datasets import DenseInkTraceDataset, collate_dense_batch
 def visualize_prediction(img, pred, target, save_path, idx=0):
     """
     Visualize prediction vs target for one sample.
-    Saves a 3x3 grid: Input, Skeletons, Junctions, Tangents, Width, Overlay.
+    Saves a 3x3 grid: Input, Skeletons, Keypoints, Tangents, Width, Overlay.
 
     Args:
         img: [1, H, W] input image tensor
@@ -85,13 +85,18 @@ def visualize_prediction(img, pred, target, save_path, idx=0):
     axes[0, 2].set_title("Pred Skeleton")
     axes[0, 2].axis("off")
 
-    # Row 2: Target Junction, Pred Junction, Width
-    axes[1, 0].imshow(target["junction"][0, 0].cpu().numpy(), cmap="magma")
-    axes[1, 0].set_title("Target Junction")
+    # Row 2: Target Keypoints (topo + geo), Pred Keypoints, Width
+    # keypoints: [2, H, W] - ch0=topo, ch1=geo
+    tgt_kp = target["keypoints"][0].cpu().numpy()  # [2, H, W]
+    pred_kp = pred["keypoints"][0].cpu().numpy()
+
+    # Visualize combined keypoints (max of both channels)
+    axes[1, 0].imshow(np.maximum(tgt_kp[0], tgt_kp[1]), cmap="magma")
+    axes[1, 0].set_title("Target Keypoints")
     axes[1, 0].axis("off")
 
-    axes[1, 1].imshow(pred["junction"][0, 0].cpu().numpy(), cmap="magma")
-    axes[1, 1].set_title("Pred Junction")
+    axes[1, 1].imshow(np.maximum(pred_kp[0], pred_kp[1]), cmap="magma")
+    axes[1, 1].set_title("Pred Keypoints")
     axes[1, 1].axis("off")
 
     # Width comparison (masked by pred skeleton)
@@ -221,7 +226,7 @@ def _vis_tangent(tan_map, mask):
 
 def compute_metrics(outputs, targets):
     """
-    Compute evaluation metrics for skeleton prediction.
+    Compute evaluation metrics for skeleton and keypoints prediction.
 
     Args:
         outputs: dict of prediction tensors
@@ -233,7 +238,7 @@ def compute_metrics(outputs, targets):
     pred_skel = (outputs["skeleton"] > 0.5).float()
     tgt_skel = (targets["skeleton"] > 0.5).float()
 
-    # Pixel-wise metrics
+    # Pixel-wise metrics for skeleton
     intersection = (pred_skel * tgt_skel).sum()
     union = pred_skel.sum() + tgt_skel.sum() - intersection
 
@@ -247,18 +252,28 @@ def compute_metrics(outputs, targets):
     # F1
     f1 = 2 * precision * recall / (precision + recall + 1e-6)
 
-    # Junction metrics
-    pred_junc = (outputs["junction"] > 0.5).float()
-    tgt_junc = (targets["junction"] > 0.5).float()
-    junc_intersection = (pred_junc * tgt_junc).sum()
-    junc_recall = (junc_intersection + 1e-6) / (tgt_junc.sum() + 1e-6)
+    # Keypoints metrics (2 channels: topo + geo)
+    # Use threshold for heatmap detection
+    pred_kp_topo = (outputs["keypoints"][:, 0:1] > 0.3).float()
+    tgt_kp_topo = (targets["keypoints"][:, 0:1] > 0.3).float()
+    pred_kp_geo = (outputs["keypoints"][:, 1:2] > 0.3).float()
+    tgt_kp_geo = (targets["keypoints"][:, 1:2] > 0.3).float()
+
+    # Topo keypoints recall
+    kp_topo_inter = (pred_kp_topo * tgt_kp_topo).sum()
+    kp_topo_recall = (kp_topo_inter + 1e-6) / (tgt_kp_topo.sum() + 1e-6)
+
+    # Geo keypoints recall
+    kp_geo_inter = (pred_kp_geo * tgt_kp_geo).sum()
+    kp_geo_recall = (kp_geo_inter + 1e-6) / (tgt_kp_geo.sum() + 1e-6)
 
     return {
         "skel_iou": iou.item(),
         "skel_precision": precision.item(),
         "skel_recall": recall.item(),
         "skel_f1": f1.item(),
-        "junc_recall": junc_recall.item(),
+        "kp_topo_recall": kp_topo_recall.item(),
+        "kp_geo_recall": kp_geo_recall.item(),
     }
 
 
@@ -267,7 +282,7 @@ def compute_batch_metrics(model, dataloader, device, num_batches=10):
     Compute metrics over multiple batches.
 
     Args:
-        model: DenseVectorModel model
+        model: model instance
         dataloader: data loader
         device: torch device
         num_batches: number of batches to evaluate
@@ -301,20 +316,92 @@ def compute_batch_metrics(model, dataloader, device, num_batches=10):
 
 
 # =============================================================================
+# DenseVisualizer for TensorBoard Integration
+# =============================================================================
+
+
+class DenseVisualizer:
+    """
+    用于在训练过程中生成可视化并写入 TensorBoard 的类。
+
+    Usage:
+        visualizer = DenseVisualizer(writer, device)
+        visualizer.visualize(model, dataloader, global_step)
+    """
+
+    def __init__(self, writer, device, num_samples=4):
+        """
+        Args:
+            writer: TensorBoard SummaryWriter
+            device: torch device
+            num_samples: number of samples to visualize
+        """
+        self.writer = writer
+        self.device = device
+        self.num_samples = num_samples
+
+    def visualize(self, model, dataloader, global_step, prefix="Dense"):
+        """
+        Generate visualization and write to TensorBoard.
+
+        Args:
+            model: model instance (in eval mode)
+            dataloader: data loader
+            global_step: current training step
+            prefix: tag prefix for TensorBoard
+        """
+        model.eval()
+
+        # Get a batch
+        try:
+            imgs, targets = next(iter(dataloader))
+        except StopIteration:
+            print("Warning: dataloader is empty, skipping visualization")
+            return
+
+        imgs = imgs[: self.num_samples].to(self.device)
+        targets = {k: v[: self.num_samples].to(self.device) for k, v in targets.items()}
+
+        with torch.no_grad():
+            outputs = model(imgs)
+
+        # Create visualization grid
+        grid = create_visualization_grid(
+            imgs,
+            {k: v.detach() for k, v in outputs.items()},
+            {k: v.detach() for k, v in targets.items()},
+            num_samples=self.num_samples,
+        )
+
+        # Write to TensorBoard (HWC -> CHW)
+        grid_tensor = torch.from_numpy(grid).permute(2, 0, 1).float() / 255.0
+        self.writer.add_image(f"{prefix}/Visualization", grid_tensor, global_step)
+
+        # Compute and log metrics
+        metrics = compute_metrics(outputs, targets)
+        for name, value in metrics.items():
+            self.writer.add_scalar(f"Metrics/{name}", value, global_step)
+
+        model.train()
+        return metrics
+
+
+# =============================================================================
 # 模型加载
 # =============================================================================
 
 
-def load_dense_model(checkpoint_path, device="cpu"):
+def load_dense_model(checkpoint_path, device="cpu", config=None):
     """
-    Load DenseVectorModel from checkpoint.
+    Load model from checkpoint using ModelFactory.
 
     Args:
         checkpoint_path: path to .pth file
         device: torch device
+        config: optional config dict
 
     Returns:
-        model: DenseVectorModel in eval mode
+        model: model in eval mode
         checkpoint: raw checkpoint dict (for metadata)
     """
     if not os.path.exists(checkpoint_path):
@@ -323,24 +410,29 @@ def load_dense_model(checkpoint_path, device="cpu"):
     print(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    # Determine embed_dim from checkpoint
-    if "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
-        # Find encoder.token_embed.weight to infer embed_dim
-        for key in state_dict.keys():
-            if "encoder.token_embed.weight" in key:
-                embed_dim = state_dict[key].shape[0]
-                break
-        else:
-            embed_dim = 128  # fallback
-    else:
-        embed_dim = 128
+    # Determine model config from checkpoint or use defaults
+    model_config = {
+        "encoder_type": "repvit",
+        "img_size": 64,
+        "embed_dim": 128,
+    }
 
-    print(f"  Detected embed_dim: {embed_dim}")
+    if config and "model" in config:
+        model_config.update(config["model"])
 
-    # Create model
-    encoder = StrokeEncoder(in_channels=1, embed_dim=embed_dim)
-    model = DenseVectorModel(encoder).to(device)
+    if "config" in checkpoint:
+        ckpt_config = checkpoint["config"]
+        if "model" in ckpt_config:
+            model_config.update(ckpt_config["model"])
+
+    print(f"  Model config: {model_config}")
+
+    # Create model using factory
+    model = ModelFactory.create_dense_model(
+        encoder_type=model_config.get("encoder_type", "repvit"),
+        img_size=model_config.get("img_size", 64),
+        embed_dim=model_config.get("embed_dim", 128),
+    ).to(device)
 
     # Load weights
     if "model_state_dict" in checkpoint:
@@ -366,11 +458,11 @@ def load_dense_model(checkpoint_path, device="cpu"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Dense Prediction 可视化与评估")
+    parser = argparse.ArgumentParser(description="Dense Prediction 可视化与评估 (V2)")
     parser.add_argument(
         "--checkpoint", type=str, required=True, help="模型 checkpoint 路径"
     )
-    parser.add_argument("--stage", type=int, default=2, help="Curriculum stage (0-5)")
+    parser.add_argument("--stage", type=int, default=2, help="Curriculum stage (0-9)")
     parser.add_argument("--num-samples", type=int, default=8, help="可视化样本数")
     parser.add_argument(
         "--stats-samples", type=int, default=0, help="统计指标样本数 (0=跳过)"
@@ -380,6 +472,7 @@ def main():
     )
     parser.add_argument("--device", type=str, default=None, help="设备 (auto/cuda/cpu)")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    parser.add_argument("--img-size", type=int, default=64, help="Image size")
 
     args = parser.parse_args()
 
@@ -398,10 +491,9 @@ def main():
     # Load model
     model, ckpt = load_dense_model(args.checkpoint, device)
 
-    # Dataset
+    # Dataset (V2)
     dataset = DenseInkTraceDataset(
-        mode="independent",
-        img_size=64,
+        img_size=args.img_size,
         batch_size=args.batch_size,
         epoch_length=max(args.num_samples, args.stats_samples, 100),
         curriculum_stage=args.stage,
@@ -409,15 +501,11 @@ def main():
 
     dataloader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=None,  # Dataset already returns batched data
         num_workers=0,
-        collate_fn=collate_dense_batch,
     )
 
-    print(
-        f"Dataset: stage={args.stage}, img_size={dataset.img_size}, "
-        f"max_strokes={dataset.max_strokes}"
-    )
+    print(f"Dataset: stage={args.stage}, img_size={dataset.img_size}")
 
     # 1. Visualization
     if args.num_samples > 0:
@@ -475,7 +563,10 @@ def main():
             f"  Skeleton F1:        {metrics['skel_f1']:.4f} ± {metrics['skel_f1_std']:.4f}"
         )
         print(
-            f"  Junction Recall:    {metrics['junc_recall']:.4f} ± {metrics['junc_recall_std']:.4f}"
+            f"  KP Topo Recall:     {metrics['kp_topo_recall']:.4f} ± {metrics['kp_topo_recall_std']:.4f}"
+        )
+        print(
+            f"  KP Geo Recall:      {metrics['kp_geo_recall']:.4f} ± {metrics['kp_geo_recall_std']:.4f}"
         )
 
     print("\nDone!")

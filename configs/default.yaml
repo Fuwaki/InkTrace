@@ -51,7 +51,7 @@ logging:
   tensorboard_dir: "runs"
 
 device:
-  type: null  # null = auto detect (cuda/xpu/cpu)
+  type: cpu  # null = auto detect (cuda/xpu/cpu)
 
 # 多阶段训练配置
 # Curriculum Stages 说明:

@@ -33,6 +33,7 @@ from models import ModelFactory, MaskingGenerator, StructuralPretrainLoss
 from losses import DenseLoss
 from datasets_v2 import DenseInkTraceDataset, collate_dense_batch
 from train_lib import Config, BaseTrainer
+from visualize_dense import DenseVisualizer
 
 
 # ============================================================================
@@ -67,10 +68,11 @@ class StructuralTrainer(BaseTrainer):
 
         # 优化器 & 调度器
         lr = float(config.training["lr"])
+        weight_decay = float(config.training.get("weight_decay", 1e-4))
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=lr,
-            weight_decay=config.training.get("weight_decay", 1e-4),
+            weight_decay=weight_decay,
         )
         total_steps = (
             config.training["epoch_length"] // config.training["batch_size"]
@@ -183,10 +185,11 @@ class DenseTrainer(BaseTrainer):
 
         # 优化器 & 调度器
         lr = float(config.training["lr"])
+        weight_decay = float(config.training.get("weight_decay", 1e-4))
         self.optimizer = optim.AdamW(
             filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=lr,
-            weight_decay=config.training.get("weight_decay", 1e-4),
+            weight_decay=weight_decay,
         )
         steps_per_epoch = (
             config.training["epoch_length"] // config.training["batch_size"]
@@ -285,6 +288,31 @@ class DenseTrainer(BaseTrainer):
 
         # 更新 curriculum
         self.update_curriculum(epoch + 1)
+
+    def set_dataloader(self, dataloader):
+        """设置 dataloader 引用，用于可视化"""
+        self.dataloader = dataloader
+        # 初始化可视化器
+        self.visualizer = DenseVisualizer(
+            writer=self.writer,
+            device=self.device,
+            num_samples=4,
+        )
+
+    def evaluate(self):
+        """在 TensorBoard 中生成可视化"""
+        if not hasattr(self, "visualizer") or not hasattr(self, "dataloader"):
+            return
+
+        metrics = self.visualizer.visualize(
+            model=self.model,
+            dataloader=self.dataloader,
+            epoch=self.epoch,
+            tag="Dense/Visualization",
+        )
+
+        # 打印指标
+        print(f"  📊 Eval: IoU={metrics['skel_iou']:.3f}, F1={metrics['skel_f1']:.3f}")
 
 
 # ============================================================================
@@ -392,6 +420,8 @@ def run_single_stage(args, config: Config, stage_name: str, init_from: str = Non
         dataloader, dataset = create_dataloader(config, stage_name)
         # 将 dataset 传递给 trainer，支持动态 curriculum
         trainer.set_dataset(dataset)
+        # 设置 dataloader 用于可视化
+        trainer.set_dataloader(dataloader)
     else:
         raise ValueError(f"Unknown stage: {stage_name}")
 
