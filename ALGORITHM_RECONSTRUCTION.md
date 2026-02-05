@@ -1,6 +1,6 @@
 # InkTrace Reconstruction Algorithm: From Pixels to Bezier Curves
 
-**Version**: 1.1
+**Version**: 1.2
 **Status**: Implementation (Phase 2 Active)
 **Scope**: Dense Map Generation (Ground Truth) & Post-processing (Reconstruction) logic.
 
@@ -106,7 +106,90 @@ Skeleton Map 输出的骨架可能在转弯处有几个像素宽，或者有毛�
 检查点序列的方向一致性。Tangent Map 存储的是 $(\cos 2\theta, \sin 2\theta)$，在还原为角度时有 $180^\circ$ 的模糊性。我们需要根据行进方向（$p_{t+1} - p_t$）来“解冻”这个角度，赋予它唯一的方向。
 
 ---
+## 2.5 Phase 2.5: Stroke Merging (笔画合并) - V1.2 新增
 
+这一步解决模型预测多节点导致笔画被分割的问题。
+
+### Problem Statement
+模型的 Junction Map 可能在一条连续笔画的中间预测出虚假的节点，导致一条笔画被分割成多个短 segment。例如：
+- 一条直线被分成 3 段
+- 一个"十"字交叉被分成 4 段，但实际应该是 2 条完整的笔画
+
+### Algorithm: Smart Stroke Merging
+
+**Key Insight**: 区分"真正的交叉点"和"虚假的中间节点"
+
+1.  **真正的分支点 (True Branch Point)**: 
+    - 拓扑上有 $\geq 3$ 个骨架邻居
+    - 代表笔画的真正分叉或交叉
+
+2.  **虚假的中间节点 (False Junction)**:
+    - 只有 2 个骨架邻居，但 Junction Map 分数高
+    - 通常是模型的误判，应该直接合并两侧的 segment
+
+### Merge Strategy
+
+```
+Algorithm: MergeFragmentedStrokes
+Input: strokes (被分割的笔画段), internal_nodes
+Output: merged_strokes
+
+1. 使用 Union-Find 数据结构管理合并关系
+2. 建立端点索引: (row, col) -> [(stroke_idx, 'start'|'end'), ...]
+
+3. For each internal_node:
+   a. 找到连接到该节点的所有 stroke 端点
+   b. 判断节点类型:
+      - 如果是虚假中间节点 (2邻居): 直接合并连接的两个 stroke
+      - 如果是真正分支点 (≥3邻居): 基于切线方向配对合并
+   
+   c. 切线配对规则:
+      - 计算每个 stroke 在端点处的切线方向 (指向笔画内部)
+      - 两个 stroke 可以合并，当且仅当:
+        * head-tail 连接: 切线方向相似 (角度差 < threshold)
+        * head-head 或 tail-tail: 切线方向相反
+
+4. 根据 Union-Find 结果，将同一组的 strokes 合并成一条连续笔画
+
+5. Return merged_strokes
+```
+
+### Configuration Parameters
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `merge_strokes` | `True` | 是否启用智能合并 |
+| `merge_angle_threshold` | `45.0°` | 合并角度阈值（对虚假节点） |
+| `min_branch_neighbors` | `3` | 认定为真正分支点的最小邻居数 |
+
+### Example
+
+**输入**: 一条横线被分成 3 段 (因为有 2 个虚假 junction)
+```
+[seg1]---junction1---[seg2]---junction2---[seg3]
+```
+
+**输出**: 合并成 1 条完整笔画
+```
+[================merged================]
+```
+
+**输入**: 十字交叉被分成 4 段
+```
+      [seg1]
+         |
+[seg2]---X---[seg3]  (X = 真正的交叉点, 4 neighbors)
+         |
+      [seg4]
+```
+
+**输出**: 基于切线方向合并成 2 条笔画
+```
+[seg1+seg4] (竖线)
+[seg2+seg3] (横线)
+```
+
+---
 ## 4. Phase 3: Curve Fitting (几何拟合)
 
 这一步的目标是用最少的贝塞尔曲线段拟合点序列 $P$。
