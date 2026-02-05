@@ -1,6 +1,0 @@
-numpy
-matplotlib
-tqdm
-scipy
-maturin # 用于编译 Rust 扩展
-timm

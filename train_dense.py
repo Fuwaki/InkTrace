@@ -57,7 +57,14 @@ def train(args):
         print(f"Resuming interrupted training from: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
 
-        model = ModelFactory.create_dense_model(embed_dim=128, device=device)
+        # Use config from checkpoint if available, else args
+        config = checkpoint.get("config", {})
+        embed_dim = config.get("embed_dim", args.embed_dim)
+        num_layers = config.get("num_layers", args.num_layers)
+
+        model = ModelFactory.create_unified_model(
+            embed_dim=embed_dim, num_layers=num_layers, full_heads=True, device=device
+        )
         model.load_state_dict(checkpoint["model_state_dict"])
 
         if "epoch" in checkpoint:
@@ -68,19 +75,46 @@ def train(args):
             print(f"  Previous best loss: {best_loss:.4f}")
 
     elif args.init_from:
-        # 跨 Stage 继续: 加载上一阶段模型，从 epoch 0 开始新训练
+        # 跨 Stage 继续: 加载上一阶段模型 (可能是 structural pretrain)，从 epoch 0 开始新训练
         print(f"Initializing from previous stage: {args.init_from}")
         checkpoint = torch.load(args.init_from, map_location=device)
 
-        model = ModelFactory.create_dense_model(embed_dim=128, device=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        print(f"  Loaded model weights (starting fresh training)")
+        config = checkpoint.get("config", {})
+        embed_dim = config.get("embed_dim", args.embed_dim)
+        num_layers = config.get("num_layers", args.num_layers)
+
+        # Create fresh model with same config
+        model = ModelFactory.create_unified_model(
+            embed_dim=embed_dim,
+            num_layers=num_layers,
+            full_heads=True,  # Ensure full heads for dense training
+            device=device,
+        )
+
+        # Load state dict
+        # 如果主要从 structural pretrain 加载，可能只有 encoder 和部分 decoder
+        # load_state_dict(..., strict=False) 这是一个好主意，因为 pretrain 没有 width/offset head
+        try:
+            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            print(f"  Loaded model weights (strict=False)")
+        except RuntimeError as e:
+            print(f"  Warning: strict load failed, trying looser load: {e}")
+            # Try loading encoder only if full load fails massively (fallback)
+            model.encoder.load_state_dict(
+                checkpoint["model_state_dict"], strict=False
+            )  # this is risky if keys don't match
+
+        print(f"  Loaded weights from {args.init_from}")
         # start_epoch = 0, best_loss = inf (重置)
 
     else:
         # 从头开始，可选加载 encoder 预训练权重
-        model = ModelFactory.create_dense_model(
-            embed_dim=128, device=device, encoder_ckpt=args.encoder_ckpt
+        model = ModelFactory.create_unified_model(
+            embed_dim=args.embed_dim,
+            num_layers=args.num_layers,
+            full_heads=True,
+            device=device,
+            encoder_ckpt=args.encoder_ckpt,
         )
 
     # Freeze Encoder if requested
@@ -320,6 +354,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rust_threads", type=int, default=4, help="Rust data generation threads"
     )
+    parser.add_argument("--embed_dim", type=int, default=128)
+    parser.add_argument("--num_layers", type=int, default=4)
 
     args = parser.parse_args()
     train(args)
