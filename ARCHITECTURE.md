@@ -125,6 +125,12 @@ graph TD
 
 ### 3.3 Prediction Heads (The "Sensors")
 
+采用 **Asymmetric Dense Heads (非对称密集头)** 设计：
+*   **Pixel Branch**: Skeleton, Tangent, Width, Offset。依赖高频细节，使用轻量级卷积。
+*   **Geometric Branch**: Keypoints。依赖局部拓扑和全局上下文，引入 **ASPP (Dilations: 1,2,4,6)** 和 **CoordConv**。
+
+初始化 Trick: 针对稀疏任务 (Skeleton, Keypoints)，最后一层 Conv bias 初始化为 **-4.59** ($\ln(0.01/0.99)$)，大幅提升收敛速度。
+
 模型输出 5 张与原图同尺寸的特征图：
 
 1.  **Skeleton Map (骨架图)**
@@ -132,9 +138,12 @@ graph TD
     *   含义: 像素是否在笔画中心线上。
     *   Loss: BCE + Dice (解决正负样本不平衡)。
 
-2.  **Junction Map (节点图)**
-    *   `[B, 1, 64, 64]`, Sigmoid
-    *   含义: 像素是否是端点或交叉点。
+2.  **Keypoints Map (关键点图)**
+    *   `[B, 2, 64, 64]`, Sigmoid
+    *   **架构**: 独立分支，集成 ASPP + CoordConv。
+    *   **Channels**:
+        *   Ch0: **Topological Nodes** (端点、交叉点)。必须断开。
+        *   Ch1: **Geometric Anchors** (急转弯、拐点)。建议断开以优化拟合。
     *   Loss: MSE (Gaussian Heatmap GT)。
 
 3.  **Tangent Field (切向场)**

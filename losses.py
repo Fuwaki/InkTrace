@@ -5,8 +5,12 @@ import torch.nn.functional as F
 
 class DenseLoss(nn.Module):
     """
-    Multi-task loss for InkTrace V4
-    L = L_skel + L_junc + L_tan + L_width + L_offset
+    Multi-task loss for InkTrace V5
+    L = L_skel + L_keypoints + L_tan + L_width + L_offset
+
+    Keypoints 是 2 通道:
+      - Ch0: Topological nodes (endpoints, junctions) - MUST break
+      - Ch1: Geometric anchors (sharp turns) - SHOULD break
 
     Note: Uses float32 casting for numerical stability under AMP.
     """
@@ -15,7 +19,7 @@ class DenseLoss(nn.Module):
         super().__init__()
         self.weights = weights or {
             "skeleton": 10.0,
-            "junction": 5.0,
+            "keypoints": 5.0,  # renamed from junction
             "tangent": 1.0,
             "width": 1.0,
             "offset": 1.0,
@@ -59,10 +63,14 @@ class DenseLoss(nn.Module):
         dice_skel = self._dice_loss(pred_skel, tgt_skel)
         losses["loss_skel"] = self.weights["skeleton"] * (bce_skel + dice_skel)
 
-        # 2. Junction Loss (MSE for Heatmap)
-        pred_junc = outputs["junction"].float()
-        tgt_junc = targets["junction"].float()
-        losses["loss_junc"] = self.weights["junction"] * F.mse_loss(pred_junc, tgt_junc)
+        # 2. Keypoints Loss (MSE for Heatmap, 2 channels)
+        #    Ch0: Topological (endpoints, junctions)
+        #    Ch1: Geometric (sharp turns, inflections)
+        pred_keys = outputs["keypoints"].float()  # [B, 2, H, W]
+        tgt_keys = targets["keypoints"].float()  # [B, 2, H, W]
+        losses["loss_keys"] = self.weights["keypoints"] * F.mse_loss(
+            pred_keys, tgt_keys
+        )
 
         # Masking for regression tasks
         # Only compute loss where skeleton is present (in GT)

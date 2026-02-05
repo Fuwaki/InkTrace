@@ -3,6 +3,11 @@ import torch.nn as nn
 from RepVit import Conv2d_BN
 
 
+# =============================================================================
+# Building Blocks
+# =============================================================================
+
+
 class AttentionGate(nn.Module):
     """
     Attention Gate: Filter features from skip connection using signal from current decoder layer.
@@ -73,156 +78,138 @@ class ConvBlock(nn.Module):
         return x + res
 
 
-class PixelDecoder(nn.Module):
+# =============================================================================
+# Universal Decoder (Unified Architecture)
+# =============================================================================
+
+
+class UniversalDecoder(nn.Module):
     """
-    轻量级像素解码器 (Phase 1 专用)
-    输入: [B, 64, embed_dim] (来自 Encoder 的序列)
-    输出: [B, 1, 64, 64] (重构图像)
+    统一解码器：通过 use_skips 开关控制是否使用跳连
+
+    - use_skips=False (预训练模式):
+        只用 f3，强迫 Encoder 在 bottleneck 编码完整的结构信息
+    - use_skips=True (正式训练模式):
+        使用 f1, f2 跳连，提高细节精度
+
+    输出头：skeleton, tangent (预训练核心), junction, width, offset (可选)
     """
 
-    def __init__(self, embed_dim=128):
+    def __init__(self, embed_dim=128, full_heads=True):
+        """
+        Args:
+            embed_dim: Encoder 输出的 embedding 维度
+            full_heads: 是否输出全部 5 个头 (False 时只输出 skeleton + tangent)
+        """
         super().__init__()
-
-        # 1. 序列转回特征图的预处理
-        # 此时输入是序列，我们先把它 reshape 回 8x8
-        self.embed_dim = embed_dim
-
-        # 2. 上采样模块 (Upsample Block)
-        # 结构: [上采样 -> 卷积 -> BN -> GELU]
-        # 目标: 8 -> 16 -> 32 -> 64 (3次上采样)
-
-        self.layer1 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear"),  # 8 -> 16
-            nn.Conv2d(embed_dim, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
-            nn.GELU(),
-        )
-
-        self.layer2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear"),  # 16 -> 32
-            nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.GELU(),
-        )
-
-        self.layer3 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear"),  # 32 -> 64
-            nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(16),
-            nn.GELU(),
-        )
-
-        # 3. 输出层 (Output Layer)
-        # 最后一层把通道压缩为 1，并用 Sigmoid 归一化到 0-1
-        self.head = nn.Sequential(
-            nn.Conv2d(16, 1, kernel_size=3, padding=1), nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        # x: [B, 64, embed_dim]  <-- 来自 Encoder 的输出
-
-        # Step 1: Reshape (序列 -> 图像)
-        # [B, 64, embed_dim] -> [B, embed_dim, 64] -> [B, embed_dim, 8, 8]
-        B, N, C = x.shape
-        H = W = int(N**0.5)  # 根号64 = 8
-        x = x.transpose(1, 2).reshape(B, C, H, W)
-
-        # Step 2: 逐级放大
-        x = self.layer1(x)  # -> [B, 64, 16, 16]
-        x = self.layer2(x)  # -> [B, 32, 32, 32]
-        x = self.layer3(x)  # -> [B, 16, 64, 64]
-
-        # Step 3: 输出图像
-        img = self.head(x)  # -> [B, 1, 64, 64]
-
-        return img
-
-
-class DenseDecoder(nn.Module):
-    """
-    Hybrid U-Net with Attention Gates for Dense Prediction Tasks.
-    Takes multi-scale features from Encoder and progressively upsamples them.
-    """
-
-    def __init__(self, embed_dim=128):
-        super().__init__()
-
-        # Feature channels from encoder (Modified StrokeEncoder)
-        # f1: 32 (32x32)
-        # f2: 128 (16x16)
-        # f3: embed_dim (8x8)
+        self.full_heads = full_heads
 
         # Project F3 from embed_dim to 128 if needed
         self.f3_proj = nn.Identity()
         if embed_dim != 128:
             self.f3_proj = nn.Conv2d(embed_dim, 128, 1)
 
-        # Layer 1: 8x8 -> 16x16
-        # Input: F3 (128). Skip: F2 (128).
+        # ========== Layer 1: 8x8 -> 16x16 ==========
         self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        # Attention Gate for skip connection (only used when use_skips=True)
         self.ag1 = AttentionGate(F_g=128, F_l=128, F_int=64)
-        self.conv1 = ConvBlock(128 + 128, 128)  # Cat F3_up, F2_gated
+        # Two versions of conv: with skip (256 in) vs without skip (128 in)
+        self.conv1_skip = ConvBlock(128 + 128, 128)
+        self.conv1_noskip = ConvBlock(128, 128)
 
-        # Deep Supervision 1 (at 16x16)
-        self.ds1_head = nn.Sequential(
-            Conv2d_BN(128, 32, 3, 1, 1),
-            nn.GELU(),
-            nn.Conv2d(32, 1, 1),
-        )
-
-        # Layer 2: 16x16 -> 32x32
-        # Input: D1 (128). Skip: F1 (32).
+        # ========== Layer 2: 16x16 -> 32x32 ==========
         self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
         self.ag2 = AttentionGate(F_g=128, F_l=32, F_int=16)
-        self.conv2 = ConvBlock(128 + 32, 64)
+        self.conv2_skip = ConvBlock(128 + 32, 64)
+        self.conv2_noskip = ConvBlock(128, 64)
 
-        # Deep Supervision 2 (at 32x32)
+        # ========== Layer 3: 32x32 -> 64x64 ==========
+        self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.conv3 = ConvBlock(64, 64)
+
+        # ========== Prediction Heads ==========
+        self.shared_conv = nn.Sequential(Conv2d_BN(64, 64, 3, 1, 1), nn.GELU())
+
+        # Core heads (always present)
+        self.skeleton_head = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Sigmoid())
+        self.tangent_head = nn.Sequential(nn.Conv2d(64, 2, 1), nn.Tanh())
+
+        # Optional heads (for full dense prediction)
+        if full_heads:
+            # Keypoints: 2ch (Ch0=topo, Ch1=geo)
+            self.keypoints_head = nn.Sequential(nn.Conv2d(64, 2, 1), nn.Sigmoid())
+            self.width_head = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Softplus())
+            self.offset_conv = nn.Conv2d(64, 2, 1)
+
+        # Deep Supervision heads
+        self.ds1_head = nn.Sequential(
+            Conv2d_BN(128, 32, 3, 1, 1), nn.GELU(), nn.Conv2d(32, 1, 1)
+        )
         self.ds2_head = nn.Sequential(
             Conv2d_BN(64, 32, 3, 1, 1), nn.GELU(), nn.Conv2d(32, 1, 1)
         )
 
-        # Layer 3: 32x32 -> 64x64
-        # Input: D2 (64). Skip: None
-        self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.conv3 = ConvBlock(64, 64)
-
-    def forward(self, features):
+    def forward(self, features, use_skips=True):
         """
         Args:
-            features: [f1, f2, f3] from Encoder
-              f1: [B, 32, 32, 32]
-              f2: [B, 128, 16, 16]
-              f3: [B, embed_dim, 8, 8]
+            features:
+                if use_skips=True: [f1, f2, f3] from Encoder
+                if use_skips=False: f3 only (or [f1, f2, f3] but f1/f2 ignored)
+            use_skips: bool, 是否使用跳连
         Returns:
-            d3: [B, 64, 64, 64] Final Feature Map
-            aux_outputs: dict containing 'ds1', 'ds2' if training
+            outputs: dict with 'skeleton', 'tangent', and optionally others
+            aux_outputs: dict with deep supervision outputs (training only)
         """
-        f1, f2, f3 = features
+        # Handle input format
+        if isinstance(features, (list, tuple)):
+            f1, f2, f3 = features
+        else:
+            # features is just f3
+            f3 = features
+            f1, f2 = None, None
 
         # Project F3 to 128 channels if needed
         f3 = self.f3_proj(f3)
 
-        # Block 1 (8 -> 16)
+        # ========== Block 1 (8 -> 16) ==========
         d1_up = self.up1(f3)  # [B, 128, 16, 16]
-        f2_gated = self.ag1(d1_up, f2)  # [B, 128, 16, 16]
-        d1 = torch.cat([d1_up, f2_gated], dim=1)
-        d1 = self.conv1(d1)  # [B, 128, 16, 16]
+        if use_skips and f2 is not None:
+            f2_gated = self.ag1(d1_up, f2)
+            d1 = torch.cat([d1_up, f2_gated], dim=1)
+            d1 = self.conv1_skip(d1)
+        else:
+            d1 = self.conv1_noskip(d1_up)
 
-        # Block 2 (16 -> 32)
+        # ========== Block 2 (16 -> 32) ==========
         d2_up = self.up2(d1)  # [B, 128, 32, 32]
-        f1_gated = self.ag2(d2_up, f1)  # [B, 32, 32, 32]
-        d2 = torch.cat([d2_up, f1_gated], dim=1)
-        d2 = self.conv2(d2)  # [B, 64, 32, 32]
+        if use_skips and f1 is not None:
+            f1_gated = self.ag2(d2_up, f1)
+            d2 = torch.cat([d2_up, f1_gated], dim=1)
+            d2 = self.conv2_skip(d2)
+        else:
+            d2 = self.conv2_noskip(d2_up)
 
-        # Block 3 (32 -> 64)
-        d3_up = self.up3(d2)  # [B, 64, 64, 64]
+        # ========== Block 3 (32 -> 64) ==========
+        d3_up = self.up3(d2)
         d3 = self.conv3(d3_up)  # [B, 64, 64, 64]
 
+        # ========== Prediction ==========
+        feat = self.shared_conv(d3)
+
+        outputs = {
+            "skeleton": self.skeleton_head(feat),
+            "tangent": self.tangent_head(feat),
+        }
+
+        if self.full_heads:
+            outputs["keypoints"] = self.keypoints_head(feat)
+            outputs["width"] = self.width_head(feat)
+            outputs["offset"] = torch.tanh(self.offset_conv(feat)) * 0.5
+
+        # Deep Supervision
         aux_outputs = {}
         if self.training:
-            ds1 = torch.sigmoid(self.ds1_head(d1))
-            ds2 = torch.sigmoid(self.ds2_head(d2))
-            aux_outputs["aux_skeleton_16"] = ds1
-            aux_outputs["aux_skeleton_32"] = ds2
+            aux_outputs["aux_skeleton_16"] = torch.sigmoid(self.ds1_head(d1))
+            aux_outputs["aux_skeleton_32"] = torch.sigmoid(self.ds2_head(d2))
 
-        return d3, aux_outputs
+        return outputs, aux_outputs
