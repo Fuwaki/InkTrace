@@ -216,11 +216,15 @@ def validate_config(config: Dict[str, Any], stage_name: str) -> None:
     if "num_workers" in data:
         data["num_workers"] = int(data["num_workers"])
         if data["num_workers"] < 0:
-            raise ValueError(f"num_workers must be non-negative, got {data['num_workers']}")
+            raise ValueError(
+                f"num_workers must be non-negative, got {data['num_workers']}"
+            )
     if "keypoint_sigma" in data:
         data["keypoint_sigma"] = float(data["keypoint_sigma"])
         if data["keypoint_sigma"] <= 0:
-            raise ValueError(f"keypoint_sigma must be positive, got {data['keypoint_sigma']}")
+            raise ValueError(
+                f"keypoint_sigma must be positive, got {data['keypoint_sigma']}"
+            )
 
     print(f"✅ Config validation passed for stage: {stage_name}")
 
@@ -368,14 +372,20 @@ def create_trainer(
     # 5. Visualization Callback
     vis_config = training_config.get("visualization", {})
     if vis_config.get("enabled", True):
+        # Dense 阶段自动启用完整可视化 (16列，包含所有预测头)
+        use_dense_vis = (stage_name == "dense")
+
         vis_callback = VisualizationCallback(
             num_samples=int(vis_config.get("num_samples", 4)),
             log_metrics=vis_config.get("log_metrics", True),
             log_interval=int(vis_config.get("log_interval", 1)),
             prefix="Validation" if stage_name != "structural" else "Train",
+            use_dense_vis=use_dense_vis,  # Dense 阶段使用完整可视化
         )
         callbacks.append(vis_callback)
-        print(f"🎨 Visualization: {vis_config.get('num_samples', 4)} samples")
+
+        vis_type = "Dense (16 cols)" if use_dense_vis else "Standard (6 cols)"
+        print(f"🎨 Visualization: {vis_config.get('num_samples', 4)} samples ({vis_type})")
 
     # =========================================================================
     # Trainer 配置

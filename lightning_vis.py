@@ -14,7 +14,7 @@ PyTorch Lightning 可视化回调 (Online Adapter)
 import pytorch_lightning as pl
 import torch
 
-from vis_core import create_grid_image, compute_metrics
+from vis_core import create_grid_image, create_dense_grid_image, compute_metrics
 
 
 class VisualizationCallback(pl.Callback):
@@ -39,6 +39,7 @@ class VisualizationCallback(pl.Callback):
         log_metrics: bool = True,
         log_interval: int = 1,
         prefix: str = "Validation",
+        use_dense_vis: bool = False,  # 新增：是否使用 Dense 可视化
     ):
         """
         Args:
@@ -46,12 +47,14 @@ class VisualizationCallback(pl.Callback):
             log_metrics: 是否记录评估指标到 TensorBoard
             log_interval: 每隔多少个 epoch 可视化一次
             prefix: TensorBoard 标签前缀
+            use_dense_vis: 是否使用 Dense 阶段的完整可视化 (16列)
         """
         super().__init__()
         self.num_samples = num_samples
         self.log_metrics = log_metrics
         self.log_interval = log_interval
         self.prefix = prefix
+        self.use_dense_vis = use_dense_vis
 
     def on_validation_epoch_end(
         self,
@@ -110,12 +113,21 @@ class VisualizationCallback(pl.Callback):
 
         # 生成可视化网格
         try:
-            grid = create_grid_image(
-                imgs,
-                outputs,
-                targets,
-                num_samples=self.num_samples,
-            )
+            # 根据 use_dense_vis 选择可视化函数
+            if self.use_dense_vis:
+                grid = create_dense_grid_image(
+                    imgs,
+                    outputs,
+                    targets,
+                    num_samples=self.num_samples,
+                )
+            else:
+                grid = create_grid_image(
+                    imgs,
+                    outputs,
+                    targets,
+                    num_samples=self.num_samples,
+                )
         except Exception as e:
             print(f"Warning: Visualization failed: {e}")
             return

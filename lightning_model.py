@@ -259,6 +259,7 @@ class UnifiedTask(pl.LightningModule):
     def on_train_batch_end(self, outputs, batch, batch_idx):
         """每个 batch 结束时的回调，用于监控训练健康度"""
         # 记录梯度范数 (每 100 步)
+        # 注意：这是裁剪后的梯度范数，所以大部分 dense 阶段会是 1.0
         if batch_idx % 100 == 0 and outputs is not None:
             total_norm = 0.0
             for p in self.model.parameters():
@@ -267,6 +268,18 @@ class UnifiedTask(pl.LightningModule):
                     total_norm += param_norm.item() ** 2
             total_norm = total_norm**0.5
             self.log("train/grad_norm", total_norm)
+
+    def on_before_optimizer_step(self, optimizer):
+        """在 optimizer.step() 之前调用（梯度裁剪前）"""
+        # 记录裁剪前的真实梯度范数
+        if self.trainer.global_step % 100 == 0:
+            total_norm = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm**0.5
+            self.log("train/grad_norm_before_clip", total_norm)
 
     # =========================================================================
     # 权重加载工具方法

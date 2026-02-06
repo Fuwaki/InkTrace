@@ -235,6 +235,7 @@ stages:
       epochs: 90         # 🔥 增加轮数
       epoch_length: 60000 # 🔥 6x 数据量 (6M total)
       batch_size: 256
+      grad_clip: 2.0
 
       scheduler:
         type: "onecycle"

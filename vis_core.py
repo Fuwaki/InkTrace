@@ -268,6 +268,156 @@ def create_grid_image(
     return img_arr
 
 
+def create_dense_grid_image(
+    imgs: torch.Tensor,
+    outputs: Dict[str, torch.Tensor],
+    targets: Dict[str, torch.Tensor],
+    num_samples: int = 4,
+) -> np.ndarray:
+    """
+    创建 Dense 阶段的完整对比可视化网格
+
+    布局：每行一个样本，包含所有 5 个预测头的对比
+    列：[Input, GT Skel, Pred Skel, GT KP Topo, Pred KP Topo,
+          GT KP Geo, Pred KP Geo, GT Tan, Pred Tan,
+          GT Width, Pred Width, GT Off, Pred Off, Overlay]
+
+    Args:
+        imgs: [B, 1, H, W] 输入图像
+        outputs: 模型输出字典（包含所有 5 个头）
+        targets: Ground Truth 字典
+        num_samples: 可视化样本数
+
+    Returns:
+        [H, W, 3] RGB 图像 (numpy array)
+    """
+    num_samples = min(num_samples, imgs.shape[0])
+    cols = 16  # 所有的预测头对比
+    rows = num_samples
+
+    # 创建更大的图
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.2, rows * 1.2))
+    if rows == 1:
+        axes = axes[None, :]
+
+    for i in range(num_samples):
+        # 提取单个样本数据
+        img = to_numpy(imgs[i])  # [H, W]
+        pred_skel = to_numpy(outputs["skeleton"][i, 0])  # [H, W]
+        tgt_skel = to_numpy(targets["skeleton"][i, 0])
+
+        # Keypoints: [2, H, W] - ch0=topo, ch1=geo
+        pred_kp = to_numpy(outputs["keypoints"][i])  # [2, H, W]
+        tgt_kp = to_numpy(targets["keypoints"][i])
+
+        # Tangent
+        pred_tan = to_numpy(outputs["tangent"][i])  # [2, H, W]
+        tgt_tan = to_numpy(targets["tangent"][i])
+
+        # Width: [H, W]
+        pred_width = to_numpy(outputs["width"][i, 0]) if "width" in outputs else np.zeros_like(img)
+        tgt_width = to_numpy(targets["width"][i, 0]) if "width" in targets else np.zeros_like(img)
+
+        # Offset: [2, H, W]
+        pred_offset = to_numpy(outputs["offset"][i]) if "offset" in outputs else np.zeros((2, *img.shape))
+        tgt_offset = to_numpy(targets["offset"][i]) if "offset" in targets else np.zeros((2, *img.shape))
+
+        # 1. Input
+        axes[i, 0].imshow(img, cmap="gray")
+        axes[i, 0].set_title("In" if i == 0 else "")
+        axes[i, 0].axis("off")
+
+        # 2. GT Skeleton
+        axes[i, 1].imshow(tgt_skel, cmap="gray")
+        axes[i, 1].set_title("GT Skel" if i == 0 else "")
+        axes[i, 1].axis("off")
+
+        # 3. Pred Skeleton
+        axes[i, 2].imshow(pred_skel, cmap="gray")
+        axes[i, 2].set_title("Pr Skel" if i == 0 else "")
+        axes[i, 2].axis("off")
+
+        # 4. GT Keypoints Topo
+        axes[i, 3].imshow(tgt_kp[0], cmap="Reds", vmin=0, vmax=1)
+        axes[i, 3].set_title("GT KP_T" if i == 0 else "")
+        axes[i, 3].axis("off")
+
+        # 5. Pred Keypoints Topo
+        axes[i, 4].imshow(pred_kp[0], cmap="Reds", vmin=0, vmax=1)
+        axes[i, 4].set_title("Pr KP_T" if i == 0 else "")
+        axes[i, 4].axis("off")
+
+        # 6. GT Keypoints Geo
+        axes[i, 5].imshow(tgt_kp[1], cmap="Greens", vmin=0, vmax=1)
+        axes[i, 5].set_title("GT KP_G" if i == 0 else "")
+        axes[i, 5].axis("off")
+
+        # 7. Pred Keypoints Geo
+        axes[i, 6].imshow(pred_kp[1], cmap="Greens", vmin=0, vmax=1)
+        axes[i, 6].set_title("Pr KP_G" if i == 0 else "")
+        axes[i, 6].axis("off")
+
+        # 8. GT Tangent
+        axes[i, 7].imshow(visualize_tangent(tgt_tan, tgt_skel))
+        axes[i, 7].set_title("GT Tan" if i == 0 else "")
+        axes[i, 7].axis("off")
+
+        # 9. Pred Tangent
+        axes[i, 8].imshow(visualize_tangent(pred_tan, pred_skel))
+        axes[i, 8].set_title("Pr Tan" if i == 0 else "")
+        axes[i, 8].axis("off")
+
+        # 10. GT Width (只显示在骨架上)
+        axes[i, 9].imshow(tgt_width * tgt_skel, cmap="viridis", vmin=0, vmax=5)
+        axes[i, 9].set_title("GT W" if i == 0 else "")
+        axes[i, 9].axis("off")
+
+        # 11. Pred Width
+        axes[i, 10].imshow(pred_width * pred_skel, cmap="viridis", vmin=0, vmax=5)
+        axes[i, 10].set_title("Pr W" if i == 0 else "")
+        axes[i, 10].axis("off")
+
+        # 12. GT Offset X
+        axes[i, 11].imshow(tgt_offset[0] * tgt_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+        axes[i, 11].set_title("GT OX" if i == 0 else "")
+        axes[i, 11].axis("off")
+
+        # 13. Pred Offset X
+        axes[i, 12].imshow(pred_offset[0] * pred_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+        axes[i, 12].set_title("Pr OX" if i == 0 else "")
+        axes[i, 12].axis("off")
+
+        # 14. GT Offset Y
+        axes[i, 13].imshow(tgt_offset[1] * tgt_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+        axes[i, 13].set_title("GT OY" if i == 0 else "")
+        axes[i, 13].axis("off")
+
+        # 15. Pred Offset Y
+        axes[i, 14].imshow(pred_offset[1] * pred_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+        axes[i, 14].set_title("Pr OY" if i == 0 else "")
+        axes[i, 14].axis("off")
+
+        # 16. Overlay (Green=GT, Red=Pred)
+        overlay = np.stack([img, img, img], axis=-1)
+        overlay[tgt_skel > 0.5] = [0, 1, 0]  # Green: GT
+        overlay[pred_skel > 0.5] = [1, 0, 0]  # Red: Pred
+        # 黄色 = 两者都有（重叠）
+        axes[i, 15].imshow(overlay)
+        axes[i, 15].set_title("Ovl" if i == 0 else "")
+        axes[i, 15].axis("off")
+
+    plt.tight_layout()
+
+    # 转换为 numpy array
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=80)  # 降低 dpi 减小文件
+    buf.seek(0)
+    img_arr = np.array(Image.open(buf))[..., :3]  # Remove alpha channel
+    plt.close(fig)
+
+    return img_arr
+
+
 def visualize_sample(
     img: torch.Tensor,
     pred: Dict[str, torch.Tensor],
