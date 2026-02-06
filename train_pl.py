@@ -45,6 +45,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from lightning_model import UnifiedTask, CurriculumCallback
 from lightning_data import InkTraceDataModule
+from lightning_vis import VisualizationCallback
 
 
 # =============================================================================
@@ -189,6 +190,21 @@ def create_trainer(
             f"stage {curriculum_config.get('start_stage', 0)} -> "
             f"{curriculum_config.get('end_stage', 9)}, "
             f"{curriculum_config.get('epochs_per_stage', 10)} epochs/stage"
+        )
+
+    # 5. Visualization Callback - 自动生成对比图并记录到 TensorBoard
+    # 可视化配置
+    vis_config = training_config.get("visualization", {})
+    if vis_config.get("enabled", True):
+        vis_callback = VisualizationCallback(
+            num_samples=vis_config.get("num_samples", 4),
+            log_metrics=vis_config.get("log_metrics", True),
+            prefix="Validation" if stage_name == "dense" else "Train",
+        )
+        callbacks.append(vis_callback)
+        print(
+            f"🎨 Visualization enabled: "
+            f"{vis_config.get('num_samples', 4)} samples per validation"
         )
 
     # =========================================================================
@@ -426,7 +442,7 @@ def main():
         config["training"]["batch_size"] = args.batch_size
 
     # 设置随机种子
-    pl.seed_everything(42, workers=True)
+    pl.seed_everything(114514, workers=True)
 
     # 运行训练
     if args.run_all_stages:

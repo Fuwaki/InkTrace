@@ -18,6 +18,7 @@ from typing import Dict, Optional, Literal
 
 from models import ModelFactory, MaskingGenerator, StructuralPretrainLoss
 from losses import DenseLoss
+from vis_core import compute_metrics
 
 
 class UnifiedTask(pl.LightningModule):
@@ -150,7 +151,21 @@ class UnifiedTask(pl.LightningModule):
             outputs = self.model(imgs)
             losses = self.criterion(outputs, targets)
 
+        # 记录总 loss
         self.log("val/loss", losses["total"], prog_bar=True, sync_dist=True)
+
+        # Dense 阶段：计算详细评估指标
+        if self.stage == "dense":
+            metrics = compute_metrics(outputs, targets)
+
+            # 记录到 TensorBoard
+            self.log("val/iou", metrics["skel_iou"], sync_dist=True)
+            self.log("val/precision", metrics["skel_precision"], sync_dist=True)
+            self.log("val/recall", metrics["skel_recall"], sync_dist=True)
+            self.log("val/f1", metrics["skel_f1"], sync_dist=True)
+            self.log("val/kp_topo_recall", metrics["kp_topo_recall"], sync_dist=True)
+            self.log("val/kp_geo_recall", metrics["kp_geo_recall"], sync_dist=True)
+
         return losses["total"]
 
     def configure_optimizers(self):
@@ -313,9 +328,7 @@ class CurriculumCallback(pl.Callback):
         self.epochs_per_stage = epochs_per_stage
         self.current_stage = start_stage
 
-    def on_train_epoch_start(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule
-    ):
+    def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         """每个 epoch 开始时检查是否需要更新 curriculum"""
         epoch = trainer.current_epoch
         target_stage = self.start_stage + (epoch // self.epochs_per_stage)

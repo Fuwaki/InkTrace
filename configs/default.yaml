@@ -39,6 +39,13 @@ training:
     end_stage: 6         # 结束阶段 (建议6, 更高阶段需要更长训练)
     epochs_per_stage: 8  # 每个阶段训练多少个 epoch 后升级
 
+  # 可视化配置
+  # 在每个 validation epoch 结束时自动生成对比图并写入 TensorBoard
+  visualization:
+    enabled: true
+    num_samples: 4       # 每次可视化几个样本
+    log_metrics: true    # 是否记录 IoU/Precision/Recall 等指标
+
 data:
   img_size: 64
   num_workers: 10
