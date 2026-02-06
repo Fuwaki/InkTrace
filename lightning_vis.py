@@ -65,11 +65,16 @@ class VisualizationCallback(pl.Callback):
         # 获取验证 DataLoader
         val_dataloaders = trainer.val_dataloaders
 
-        if val_dataloaders is None or len(val_dataloaders) == 0:
+        if val_dataloaders is None:
             return
 
-        # 通常只有一个 val_dataloader
-        dataloader = val_dataloaders[0]
+        # 处理两种情况：DataLoader 对象或 DataLoader 列表
+        if isinstance(val_dataloaders, list):
+            if len(val_dataloaders) == 0:
+                return
+            dataloader = val_dataloaders[0]
+        else:
+            dataloader = val_dataloaders
 
         try:
             # 获取一个 batch
