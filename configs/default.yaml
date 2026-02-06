@@ -51,6 +51,7 @@ data:
   num_workers: 10
   rust_threads: 10
   curriculum_stage: 0  # 初始阶段 (如果 curriculum.enabled=true, 会自动递增)
+  keypoint_sigma: 1.5  # 高斯热力图标准差 (适合 64x64，范围 1.0-2.5)
 
 logging:
   log_interval: 10  # 每 N step 记录一次

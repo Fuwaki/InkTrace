@@ -12,9 +12,12 @@ def gaussian_focal_loss(pred, target, alpha=2.0, beta=4.0):
     """
     Modified Focal Loss for Gaussian Heatmap (CenterNet Style)
 
-    对于高斯热力图：
-    - 正样本 (target=1): Focal Loss 惩罚难分类样本
-    - 负样本 (target<1): 根据高斯值加权，离中心越近惩罚越轻
+    软标签交叉熵损失，适用于高斯热力图回归。
+    与硬标签不同，高斯热力图的 GT 是连续值 [0, 1]。
+
+    损失公式：
+      - 正样本区域 (target > 0): -target * (1-p)^alpha * log(p)
+      - 负样本区域 (target = 0): -(1-target)^beta * p^alpha * log(1-p)
 
     Args:
         pred: [B, C, H, W] 预测热力图 (sigmoid 输出)
@@ -28,147 +31,30 @@ def gaussian_focal_loss(pred, target, alpha=2.0, beta=4.0):
     pred = pred.float().clamp(min=1e-6, max=1 - 1e-6)
     target = target.float()
 
-    # 正样本 mask: 高斯中心 (target == 1)
-    pos_mask = target.eq(1).float()
-    neg_mask = target.lt(1).float()
+    # 软标签交叉熵：每个像素都参与，权重 = target 值
+    # 正样本区域：target 值越大，权重越高
+    # 负样本区域：target 值越小，权重越低
+    pos_weights = target
 
-    # 负样本权重: (1 - target)^beta，离中心越近权重越低
+    # 负样本权重: (1 - target)^beta
     neg_weights = torch.pow(1 - target, beta)
 
-    # Focal Loss
-    # 正样本: -((1-p)^alpha) * log(p)
-    pos_loss = torch.pow(1 - pred, alpha) * torch.log(pred) * pos_mask
+    # Focal Loss with soft labels
+    # 使用 target 作为软标签，而不是硬 0/1
+    pos_loss = pos_weights * torch.pow(1 - pred, alpha) * torch.log(pred)
 
-    # 负样本: -((1-t)^beta) * (p^alpha) * log(1-p)
-    neg_loss = neg_weights * torch.pow(pred, alpha) * torch.log(1 - pred) * neg_mask
+    # 负样本损失
+    neg_loss = neg_weights * torch.pow(pred, alpha) * torch.log(1 - pred)
 
-    # 归一化: 除以正样本数量
-    num_pos = pos_mask.sum().clamp(min=1.0)
-    loss = -(pos_loss.sum() + neg_loss.sum()) / num_pos
+    # 总损失
+    loss = -(pos_loss.sum() + neg_loss.sum())
+
+    # 归一化：除以像素数量（稳定的归一化）
+    num_pixels = pred.numel()
+    loss = loss / num_pixels
 
     return loss
 
-
-# =============================================================================
-# NMS for Keypoint Extraction (Inference)
-# =============================================================================
-
-
-def keypoint_nms(heatmap, kernel_size=3, threshold=0.1):
-    """
-    Non-Maximum Suppression for heatmap keypoint extraction.
-
-    Args:
-        heatmap: [B, C, H, W] 预测热力图
-        kernel_size: NMS 窗口大小
-        threshold: 置信度阈值
-
-    Returns:
-        nms_heatmap: [B, C, H, W] 只保留局部最大值的热力图
-    """
-    pad = (kernel_size - 1) // 2
-
-    # Max pooling 找局部最大值
-    hmax = F.max_pool2d(heatmap, kernel_size, stride=1, padding=pad)
-
-    # 只保留等于局部最大值的点
-    keep = (hmax == heatmap).float()
-
-    # 应用阈值
-    return heatmap * keep * (heatmap > threshold).float()
-
-
-def extract_keypoints(heatmap, kernel_size=3, threshold=0.1, topk=100):
-    """
-    从热力图提取关键点坐标。
-
-    Args:
-        heatmap: [B, C, H, W] 预测热力图
-        kernel_size: NMS 窗口大小
-        threshold: 置信度阈值
-        topk: 每个通道最多提取的点数
-
-    Returns:
-        keypoints: List[List[Tensor]] 每个 batch、每个通道的关键点
-                   每个 Tensor 形状为 [N, 3] (y, x, score)
-    """
-    B, C, H, W = heatmap.shape
-
-    # NMS
-    nms_heat = keypoint_nms(heatmap, kernel_size, threshold)
-
-    results = []
-    for b in range(B):
-        batch_kps = []
-        for c in range(C):
-            heat = nms_heat[b, c]  # [H, W]
-
-            # 找非零点
-            scores, indices = heat.flatten().topk(min(topk, H * W))
-            valid = scores > threshold
-            scores = scores[valid]
-            indices = indices[valid]
-
-            if len(scores) > 0:
-                ys = (indices // W).float()
-                xs = (indices % W).float()
-                kps = torch.stack([ys, xs, scores], dim=1)  # [N, 3]
-            else:
-                kps = torch.zeros(0, 3, device=heatmap.device)
-
-            batch_kps.append(kps)
-        results.append(batch_kps)
-
-    return results
-
-
-# =============================================================================
-# Gaussian Heatmap Rendering (for GT generation)
-# =============================================================================
-
-
-def render_gaussian_heatmap(keypoints_onehot, sigma=1.5):
-    """
-    将独热点 GT 转换为高斯热力图 GT。
-
-    Args:
-        keypoints_onehot: [B, C, H, W] 独热点 GT (0/1)
-        sigma: 高斯标准差 (对于 64x64，建议 1.0~2.0)
-
-    Returns:
-        gaussian_heatmap: [B, C, H, W] 高斯热力图 (0~1)
-    """
-    B, C, H, W = keypoints_onehot.shape
-    device = keypoints_onehot.device
-
-    # 创建高斯核
-    # 核大小 = 6*sigma (覆盖 99.7% 的分布)
-    kernel_size = int(6 * sigma + 1) | 1  # 确保为奇数
-    half = kernel_size // 2
-
-    # 生成 2D 高斯核
-    y = torch.arange(-half, half + 1, device=device, dtype=torch.float32)
-    x = torch.arange(-half, half + 1, device=device, dtype=torch.float32)
-    yy, xx = torch.meshgrid(y, x, indexing="ij")
-    gaussian_kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
-    gaussian_kernel = gaussian_kernel / gaussian_kernel.max()  # 归一化到 0~1
-
-    # 将核扩展为 conv2d 所需格式: [C_out, C_in, H, W]
-    # 对每个通道独立卷积
-    gaussian_kernel = gaussian_kernel.view(1, 1, kernel_size, kernel_size)
-
-    # 对每个通道进行卷积
-    result = []
-    for c in range(C):
-        channel = keypoints_onehot[:, c : c + 1, :, :]  # [B, 1, H, W]
-        # 使用 padding='same' 保持尺寸
-        blurred = F.conv2d(channel, gaussian_kernel, padding=half)
-        result.append(blurred)
-
-    gaussian_heatmap = torch.cat(result, dim=1)
-
-    # Clamp to [0, 1]
-    return gaussian_heatmap.clamp(0, 1)
 
 
 class DenseLoss(nn.Module):
@@ -233,9 +119,10 @@ class DenseLoss(nn.Module):
         # 2. Keypoints Loss (Gaussian Focal Loss, 2 channels)
         #    Ch0: Topological (endpoints, junctions)
         #    Ch1: Geometric (sharp turns, inflections)
-        #    GT should be Gaussian heatmaps, not one-hot
+        #    GT: Dataset 已转换为高斯热力图 (datasets_v2.py)
+        #    推理时: 使用 keypoint_nms() + extract_keypoints() 提取离散点
         pred_keys = outputs["keypoints"].float()  # [B, 2, H, W]
-        tgt_keys = targets["keypoints"].float()  # [B, 2, H, W]
+        tgt_keys = targets["keypoints"].float()  # [B, 2, H, W] Gaussian heatmap
         losses["loss_keys"] = self.weights["keypoints"] * gaussian_focal_loss(
             pred_keys, tgt_keys, alpha=2.0, beta=4.0
         )

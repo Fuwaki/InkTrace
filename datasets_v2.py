@@ -23,6 +23,61 @@ from torch.utils.data import IterableDataset, DataLoader
 import numpy as np
 import ink_trace_rs
 import math
+import torch.nn.functional as F
+
+
+# =============================================================================
+# 高斯热力图渲染工具 (用于 Keypoints 数据生成)
+# =============================================================================
+
+
+def render_gaussian_heatmap(keypoints_onehot, sigma=1.5):
+    """
+    将独热点 GT 转换为高斯热力图 GT。
+
+    用于 Keypoints 训练：
+      - 输入：独热点 (0/1) - 从 Rust 生成
+      - 输出：高斯热力图 (0~1) - 用于 Gaussian Focal Loss
+      - 推理时：使用 NMS 提取离散点
+
+    Args:
+        keypoints_onehot: [B, C, H, W] 独热点 GT (0/1)
+        sigma: 高斯标准差 (对于 64x64，建议 1.0~2.0)
+
+    Returns:
+        gaussian_heatmap: [B, C, H, W] 高斯热力图 (0~1)
+    """
+    B, C, H, W = keypoints_onehot.shape
+    device = keypoints_onehot.device
+
+    # 创建高斯核
+    # 核大小 = 6*sigma (覆盖 99.7% 的分布)
+    kernel_size = int(6 * sigma + 1) | 1  # 确保为奇数
+    half = kernel_size // 2
+
+    # 生成 2D 高斯核
+    y = torch.arange(-half, half + 1, device=device, dtype=torch.float32)
+    x = torch.arange(-half, half + 1, device=device, dtype=torch.float32)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    gaussian_kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+    gaussian_kernel = gaussian_kernel / gaussian_kernel.max()  # 归一化到 0~1
+
+    # 将核扩展为 conv2d 所需格式: [C_out, C_in, H, W]
+    # 对每个通道独立卷积
+    gaussian_kernel = gaussian_kernel.view(1, 1, kernel_size, kernel_size)
+
+    # 对每个通道进行卷积
+    result = []
+    for c in range(C):
+        channel = keypoints_onehot[:, c : c + 1, :, :]  # [B, 1, H, W]
+        # 使用 padding='same' 保持尺寸
+        blurred = F.conv2d(channel, gaussian_kernel, padding=half)
+        result.append(blurred)
+
+    gaussian_heatmap = torch.cat(result, dim=1)
+
+    # Clamp to [0, 1]
+    return gaussian_heatmap.clamp(0, 1)
 
 
 class DenseInkTraceDataset(IterableDataset):
@@ -52,6 +107,7 @@ class DenseInkTraceDataset(IterableDataset):
         epoch_length: int = 10000,
         curriculum_stage: int = 0,
         rust_threads: int = None,
+        keypoint_sigma: float = 1.5,
     ):
         """
         Args:
@@ -60,6 +116,7 @@ class DenseInkTraceDataset(IterableDataset):
             epoch_length: 每个 epoch 的样本数
             curriculum_stage: 训练阶段 (0-9)
             rust_threads: Rayon 线程数 (None 表示自动)
+            keypoint_sigma: 高斯热力图标准差 (默认 1.5，适合 64x64)
         """
         super().__init__()
         self.img_size = img_size
@@ -67,6 +124,7 @@ class DenseInkTraceDataset(IterableDataset):
         self.epoch_length = epoch_length
         self.curriculum_stage = curriculum_stage
         self.rust_threads = rust_threads
+        self.keypoint_sigma = keypoint_sigma
 
         # 获取阶段信息
         self.stage_info = ink_trace_rs.get_stage_info(curriculum_stage)
@@ -122,11 +180,17 @@ class DenseInkTraceDataset(IterableDataset):
                 # 转换为 PyTorch tensors
                 img_tensor = torch.from_numpy(batch["image"][i]).unsqueeze(0)
 
+                # Keypoints: 从独热点转换为高斯热力图
+                # Rust 输出的是 one-hot，训练时需要 Gaussian heatmap + Focal Loss
+                keypoints_onehot = torch.from_numpy(batch["keypoints"][i].copy())  # [2, H, W]
+                keypoints_onehot = keypoints_onehot.unsqueeze(0)  # [1, 2, H, W] for batch dimension
+                keypoints_gaussian = render_gaussian_heatmap(
+                    keypoints_onehot, sigma=self.keypoint_sigma
+                ).squeeze(0)  # [2, H, W]
+
                 targets = {
                     "skeleton": torch.from_numpy(batch["skeleton"][i]).unsqueeze(0),
-                    "keypoints": torch.from_numpy(
-                        batch["keypoints"][i].copy()
-                    ),  # [2, H, W]
+                    "keypoints": keypoints_gaussian,  # 高斯热力图
                     "tangent": torch.from_numpy(
                         batch["tangent"][i].copy()
                     ),  # [2, H, W]
@@ -164,6 +228,7 @@ def create_dense_dataloader(
     epoch_length: int = 10000,
     curriculum_stage: int = 0,
     num_workers: int = 4,
+    keypoint_sigma: float = 1.5,
 ):
     """创建 Dense 训练用 DataLoader
 
@@ -173,6 +238,7 @@ def create_dense_dataloader(
         epoch_length: 每个 epoch 的样本数
         curriculum_stage: 训练阶段 (0-9)
         num_workers: DataLoader worker 数量
+        keypoint_sigma: 高斯热力图标准差
 
     Returns:
         (dataloader, dataset) 元组
@@ -182,6 +248,7 @@ def create_dense_dataloader(
         batch_size=batch_size,  # Rust 内部批量大小
         epoch_length=epoch_length,
         curriculum_stage=curriculum_stage,
+        keypoint_sigma=keypoint_sigma,
     )
 
     dataloader = DataLoader(

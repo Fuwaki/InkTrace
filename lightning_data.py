@@ -45,6 +45,7 @@ class InkTraceDataModule(pl.LightningDataModule):
         rust_threads: Optional[int] = None,
         pin_memory: bool = True,
         persistent_workers: bool = True,
+        keypoint_sigma: float = 1.5,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -57,6 +58,7 @@ class InkTraceDataModule(pl.LightningDataModule):
         self.rust_threads = rust_threads
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
+        self.keypoint_sigma = keypoint_sigma
 
         # 数据集实例 (会在 setup 中创建)
         self._train_dataset: Optional[DenseInkTraceDataset] = None
@@ -76,6 +78,7 @@ class InkTraceDataModule(pl.LightningDataModule):
                 epoch_length=self.epoch_length,
                 curriculum_stage=self.curriculum_stage,
                 rust_threads=self.rust_threads,
+                keypoint_sigma=self.keypoint_sigma,
             )
 
             # 验证集使用相同配置但可能不同的 stage
@@ -85,6 +88,7 @@ class InkTraceDataModule(pl.LightningDataModule):
                 epoch_length=self.epoch_length // 10,  # 验证集更小
                 curriculum_stage=self.curriculum_stage,
                 rust_threads=self.rust_threads,
+                keypoint_sigma=self.keypoint_sigma,
             )
 
         if stage == "validate":
@@ -94,6 +98,7 @@ class InkTraceDataModule(pl.LightningDataModule):
                 epoch_length=self.epoch_length // 10,
                 curriculum_stage=self.curriculum_stage,
                 rust_threads=self.rust_threads,
+                keypoint_sigma=self.keypoint_sigma,
             )
 
     def train_dataloader(self) -> DataLoader:
@@ -175,4 +180,5 @@ def create_datamodule_from_config(config: dict) -> InkTraceDataModule:
         curriculum_stage=data_config.get("curriculum_stage", 0),
         num_workers=data_config.get("num_workers", 4),
         rust_threads=data_config.get("rust_threads", None),
+        keypoint_sigma=data_config.get("keypoint_sigma", 1.5),
     )
