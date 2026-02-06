@@ -11,7 +11,6 @@ PyTorch Lightning 可视化回调 (Online Adapter)
 - vis_core (核心渲染层)
 """
 
-
 import pytorch_lightning as pl
 import torch
 
@@ -38,17 +37,20 @@ class VisualizationCallback(pl.Callback):
         self,
         num_samples: int = 4,
         log_metrics: bool = True,
+        log_interval: int = 1,
         prefix: str = "Validation",
     ):
         """
         Args:
             num_samples: 每次可视化的样本数量
             log_metrics: 是否记录评估指标到 TensorBoard
+            log_interval: 每隔多少个 epoch 可视化一次
             prefix: TensorBoard 标签前缀
         """
         super().__init__()
         self.num_samples = num_samples
         self.log_metrics = log_metrics
+        self.log_interval = log_interval
         self.prefix = prefix
 
     def on_validation_epoch_end(
@@ -62,6 +64,10 @@ class VisualizationCallback(pl.Callback):
         注意：这里使用 val_dataloaders 而不是 train_dataloaders，
         因为验证数据更稳定，且可以在训练过程中监控模型性能
         """
+        # 检查是否应该在这个 epoch 可视化
+        if trainer.current_epoch % self.log_interval != 0:
+            return
+
         # 获取验证 DataLoader
         val_dataloaders = trainer.val_dataloaders
 

@@ -7,6 +7,7 @@ PyTorch Lightning Module for InkTrace
 
 核心改进：
 - 使用 self.trainer.estimated_stepping_batches 自动计算 OneCycleLR 步数
+- 支持多种学习率调度器 (OneCycleLR, CosineAnnealingLR, Constant)
 - 自动处理 Curriculum Learning
 - 简化的权重加载和迁移学习
 """
@@ -35,6 +36,9 @@ class UnifiedTask(pl.LightningModule):
         mask_ratio: 遮挡比例 (仅 structural 阶段)
         mask_strategy: 遮挡策略 (仅 structural 阶段)
         grad_clip: 梯度裁剪阈值
+        scheduler_type: 学习率调度器类型 ("onecycle", "cosine", "constant")
+        warmup_epochs: 预热轮数
+        pct_start: OneCycleLR warmup 占比
     """
 
     def __init__(
@@ -48,6 +52,9 @@ class UnifiedTask(pl.LightningModule):
         mask_ratio: float = 0.6,
         mask_strategy: str = "block",
         grad_clip: float = 1.0,
+        scheduler_type: str = "onecycle",
+        warmup_epochs: int = 2,
+        pct_start: float = 0.1,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -56,6 +63,9 @@ class UnifiedTask(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.grad_clip = grad_clip
+        self.scheduler_type = scheduler_type
+        self.warmup_epochs = warmup_epochs
+        self.pct_start = pct_start
 
         # 创建模型
         full_heads = stage == "dense"
@@ -172,34 +182,65 @@ class UnifiedTask(pl.LightningModule):
         """
         配置优化器和学习率调度器
 
+        支持多种调度器：
+        - onecycle: OneCycleLR (推荐，训练效果最好)
+        - cosine: CosineAnnealingLR (适合微调)
+        - constant: 固定学习率 (调试用)
+
         关键点：使用 self.trainer.estimated_stepping_batches 自动计算总步数
-        这解决了无限数据集与 OneCycleLR 步数不匹配的问题
         """
         optimizer = optim.AdamW(
             filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=self.lr,
             weight_decay=self.weight_decay,
+            betas=(0.9, 0.999),
+            eps=1e-8,
         )
 
         # 使用 Lightning 内置的步数估计
-        # 这会根据 max_epochs 和 limit_train_batches 自动计算
         total_steps = self.trainer.estimated_stepping_batches
-        print(f"\n📊 OneCycleLR total_steps: {total_steps}")
+        print(f"\n📊 Scheduler: {self.scheduler_type}")
+        print(f"   Total steps: {total_steps}")
+        print(f"   Learning rate: {self.lr}")
 
-        scheduler = optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=self.lr,
-            total_steps=total_steps,
-        )
+        if self.scheduler_type == "onecycle":
+            scheduler = optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=self.lr,
+                total_steps=total_steps,
+                pct_start=self.pct_start,
+                anneal_strategy="cos",
+                div_factor=25.0,  # 初始 lr = max_lr / 25
+                final_div_factor=1e4,  # 最终 lr = max_lr / 1e4
+            )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                    "frequency": 1,
+                },
+            }
 
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",  # 每步更新
-                "frequency": 1,
-            },
-        }
+        elif self.scheduler_type == "cosine":
+            # CosineAnnealingLR 按 epoch 更新
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=self.trainer.max_epochs,
+                eta_min=self.lr * 0.01,  # 最终 lr = 1% of initial
+            )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "epoch",
+                    "frequency": 1,
+                },
+            }
+
+        else:  # constant
+            # 固定学习率，不使用调度器
+            return optimizer
 
     def on_train_epoch_start(self):
         """Epoch 开始时的回调"""
@@ -211,6 +252,21 @@ class UnifiedTask(pl.LightningModule):
                 "curriculum/stage",
                 float(self.trainer.datamodule.curriculum_stage),
             )
+
+        # 记录当前 epoch
+        self.log("train/epoch", float(self.current_epoch))
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        """每个 batch 结束时的回调，用于监控训练健康度"""
+        # 记录梯度范数 (每 100 步)
+        if batch_idx % 100 == 0 and outputs is not None:
+            total_norm = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm**0.5
+            self.log("train/grad_norm", total_norm)
 
     # =========================================================================
     # 权重加载工具方法

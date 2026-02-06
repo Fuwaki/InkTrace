@@ -22,11 +22,10 @@ from decoder import UniversalDecoder
 
 class MaskingGenerator:
     """
-    生成遮挡 Mask，用于结构预训练
+    向量化优化的遮挡生成器 (High Performance)
 
     策略：
     - block: 随机遮挡若干个矩形块 (类似 MAE)
-    - stroke: 沿笔画方向遮挡 (更符合书写逻辑)
     - random: 随机像素遮挡
     """
 
@@ -34,7 +33,7 @@ class MaskingGenerator:
         """
         Args:
             mask_ratio: 遮挡比例 (0.0 ~ 1.0)
-            strategy: 遮挡策略 ('block', 'stroke', 'random')
+            strategy: 遮挡策略 ('block', 'random')
             block_size: block 策略时的块大小
         """
         self.mask_ratio = mask_ratio
@@ -53,43 +52,51 @@ class MaskingGenerator:
         device = imgs.device
 
         if self.strategy == "block":
-            mask = self._generate_block_mask(B, H, W, device)
+            mask = self._generate_block_mask_vectorized(B, H, W, device)
         elif self.strategy == "random":
-            mask = self._generate_random_mask(B, H, W, device)
+            mask = (torch.rand(B, 1, H, W, device=device) < self.mask_ratio).float()
         else:
             # Default to block
-            mask = self._generate_block_mask(B, H, W, device)
+            mask = self._generate_block_mask_vectorized(B, H, W, device)
 
         # Apply mask: set masked regions to 0 (or background value)
         masked_imgs = imgs * (1 - mask)
 
         return masked_imgs, mask
 
-    def _generate_block_mask(self, B, H, W, device):
-        """生成块状遮挡 mask"""
-        # 计算需要遮挡多少个块
-        num_blocks_h = H // self.block_size
-        num_blocks_w = W // self.block_size
-        total_blocks = num_blocks_h * num_blocks_w
-        num_masked = int(total_blocks * self.mask_ratio)
+    def _generate_block_mask_vectorized(self, B, H, W, device):
+        """
+        完全向量化的 Block Mask 生成
+        原理：在 Grid 层级生成 Mask，然后插值放大
+        性能：O(1) Python调用，全部GPU并行，10-100x加速
+        """
+        # 1. 计算 Grid 尺寸 (例如 64x64 img, 8 block -> 8x8 grid)
+        H_grid = H // self.block_size
+        W_grid = W // self.block_size
+        num_blocks = H_grid * W_grid
+        num_masked = int(num_blocks * self.mask_ratio)
 
-        mask = torch.zeros(B, 1, H, W, device=device)
+        # 2. 生成随机噪声 [B, num_blocks]
+        noise = torch.rand(B, num_blocks, device=device)
 
-        for b in range(B):
-            # 随机选择要遮挡的块索引
-            indices = torch.randperm(total_blocks, device=device)[:num_masked]
+        # 3. 找出需要 Mask 的索引 (Top-K 逻辑)
+        # argsort 的开销远小于几千次 Python 循环
+        ids_shuffle = torch.argsort(noise, dim=1)  # [B, num_blocks]
+        ids_mask = ids_shuffle[:, :num_masked]     # [B, num_masked] 取前 K 个
 
-            for idx in indices:
-                row = (idx // num_blocks_w) * self.block_size
-                col = (idx % num_blocks_w) * self.block_size
-                mask[b, 0, row : row + self.block_size, col : col + self.block_size] = 1
+        # 4. 创建 Grid Mask [B, num_blocks]
+        mask_flat = torch.zeros(B, num_blocks, device=device)
+        # scatter_ 是完全并行的 GPU 操作
+        mask_flat.scatter_(1, ids_mask, 1.0)
+
+        # 5. Reshape 回 [B, 1, H_grid, W_grid]
+        mask_grid = mask_flat.view(B, 1, H_grid, W_grid)
+
+        # 6. 上采样回原图尺寸 (Nearest Neighbor = 完美的 Block 效果)
+        # 这一步非常快，是 GPU 的拿手好戏
+        mask = F.interpolate(mask_grid, size=(H, W), mode='nearest')
 
         return mask
-
-    def _generate_random_mask(self, B, H, W, device):
-        """生成随机像素遮挡 mask"""
-        mask = torch.rand(B, 1, H, W, device=device) < self.mask_ratio
-        return mask.float()
 
 
 # =============================================================================

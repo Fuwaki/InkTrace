@@ -1,96 +1,302 @@
-# 默认配置文件 - 所有训练的超参数集中管理
-# 使用方法: python train.py --config configs/default.yaml
+# =============================================================================
+# InkTrace V5 训练配置
+# =============================================================================
+# 配置原则：
+#   1. 顶层定义全局默认值
+#   2. stages 字典定义各阶段的覆盖配置
+#   3. pipeline 定义训练周期中的执行顺序
+#   4. 每个阶段可覆盖任意默认配置项（深度合并）
+#   5. 未指定的配置项自动继承默认值
+#
+# 使用方法：
+#   python train_pl.py --config configs/default.yaml --stage structural
+#   python train_pl.py --config configs/default.yaml --stage dense
+#   python train_pl.py --config configs/default.yaml --run-all-stages
+# =============================================================================
+
+
+# =============================================================================
+# 全局默认配置 (所有阶段的基础)
+# =============================================================================
 
 model:
-  embed_dim: 128
-  num_layers: 4
-  full_heads: true  # false for structural pretrain
+  embed_dim: 128          # Encoder embedding 维度
+  num_layers: 4           # Transformer 层数
+  num_heads: 4            # Attention 头数
+  dropout: 0.1            # Dropout 率
+  full_heads: true        # 是否输出全部 5 个预测头
 
 training:
-  lr: 1e-3
-  batch_size: 128
-  epochs: 50
-  epoch_length: 10000
-  weight_decay: 1e-4
-  grad_clip: 1.0
-
-  # Scheduler
-  scheduler: "onecycle"  # or "cosine"
-  total_steps: null  # 自动计算
-
-  # Checkpoint
-  save_dir: "checkpoints"
-  save_interval: 5  # 每 N epoch 保存一次
-  keep_last_n: 3  # 保留最近 N 个 checkpoint
-
-  # Loss 权重
+  # 基础训练参数
+  lr: 1e-3                # 学习率
+  min_lr: 1e-6            # 最小学习率 (用于 warmup 和 scheduler)
+  batch_size: 128         # 批次大小
+  epochs: 50              # 训练轮数
+  epoch_length: 10000     # 每个 epoch 的样本数
+  weight_decay: 1e-4      # AdamW 权重衰减
+  grad_clip: 1.0          # 梯度裁剪阈值
+  
+  # 学习率调度器
+  scheduler:
+    type: "onecycle"      # "onecycle", "cosine", "constant"
+    warmup_epochs: 2      # 预热轮数
+    warmup_start_lr: 1e-6 # 预热起始学习率
+    pct_start: 0.1        # OneCycleLR: warmup 占总步数比例
+  
+  # Checkpoint 管理
+  checkpoint:
+    save_dir: "checkpoints"
+    keep_top_k: 3         # 保留 top-k 最优 checkpoint
+    save_last: true       # 始终保存 last.ckpt
+    monitor: "val/loss"   # 监控指标
+    mode: "min"           # "min" 或 "max"
+  
+  # Loss 权重 (Dense 阶段)
   loss_weights:
-    skeleton: 10.0
-    keypoints: 5.0
-    tangent: 1.0
-    width: 1.0
-    offset: 1.0
-
+    skeleton: 10.0        # 骨架 (最重要)
+    keypoints: 5.0        # 关键点
+    tangent: 2.0          # 切向场 (对拟合重要)
+    width: 1.0            # 宽度
+    offset: 1.0           # 偏移
+  
   # Curriculum Learning (渐进式训练)
-  # 启用后会自动从简单样本逐渐过渡到复杂样本
   curriculum:
-    enabled: true
-    start_stage: 0       # 起始阶段 (0=单笔画)
-    end_stage: 6         # 结束阶段 (建议6, 更高阶段需要更长训练)
-    epochs_per_stage: 8  # 每个阶段训练多少个 epoch 后升级
-
+    enabled: false        # 默认关闭，在具体阶段开启
+    start_stage: 0        # 起始阶段
+    end_stage: 6          # 结束阶段 (建议 6)
+    epochs_per_stage: 10  # 每个阶段训练轮数
+  
   # 可视化配置
-  # 在每个 validation epoch 结束时自动生成对比图并写入 TensorBoard
   visualization:
     enabled: true
-    num_samples: 4       # 每次可视化几个样本
-    log_metrics: true    # 是否记录 IoU/Precision/Recall 等指标
+    num_samples: 4        # 每次可视化样本数
+    log_interval: 1       # 每 N epoch 可视化一次
+    log_metrics: true     # 记录 IoU/Precision/Recall
 
 data:
-  img_size: 64
-  num_workers: 16
-  rust_threads: 16
-  curriculum_stage: 0  # 初始阶段 (如果 curriculum.enabled=true, 会自动递增)
-  keypoint_sigma: 1.5  # 高斯热力图标准差 (适合 64x64，范围 1.0-2.5)
+  img_size: 64            # 图像尺寸
+  num_workers: 8          # DataLoader worker 数量
+  rust_threads: null      # Rust 生成器线程数 (null=自动)
+  pin_memory: true        # 是否使用 pin_memory
+  persistent_workers: true
+  keypoint_sigma: 1.5     # 高斯热力图标准差
+  curriculum_stage: 0     # 初始 curriculum 阶段
 
 logging:
-  log_interval: 10  # 每 N step 记录一次
-  vis_interval: 2  # 每 N epoch 可视化一次
+  log_interval: 10        # 每 N step 记录一次
   tensorboard_dir: "runs"
 
 device:
-  type: cuda  # null = auto detect (cuda/xpu/cpu)
+  accelerator: "auto"     # "auto", "gpu", "cpu"
+  precision: "16-mixed"   # "32", "16-mixed", "bf16-mixed"
 
-# 多阶段训练配置
+
+# =============================================================================
+# 多阶段训练流水线 (Pipeline)
+# =============================================================================
+# 定义训练周期中依次执行的阶段及权重传递规则
+# =============================================================================
+
+pipeline:
+  # 训练顺序 (按列表顺序执行)
+  order:
+    - "structural"
+    - "dense"
+  
+  # 自动权重传递: 将上一阶段的最优权重自动传递给下一阶段
+  auto_transfer: true
+
+
+# =============================================================================
+# 阶段定义 (覆盖配置)
+# =============================================================================
 # Curriculum Stages 说明:
 #   Stage 0:   单笔画 (最简单)
 #   Stage 1-3: 多独立笔画 (递增: 1-3, 2-5, 3-8 笔画)
 #   Stage 4-6: 多段连续笔画 (递增: 2-3, 3-5, 4-8 段)
 #   Stage 7-9: 混合模式 (多条多段路径, 最复杂)
+# =============================================================================
+
 stages:
-  - name: "structural"
-    epochs: 30
+  # =========================================================================
+  # Phase 1: Structural Pretraining (结构预训练)
+  # =========================================================================
+  # 目标：让 Encoder 学会从残缺输入推断完整结构
+  # 方法：Masking + Reconstruction (类似 MAE)
+  # 特点：关闭跳连，强迫 Encoder 在 bottleneck 编码完整信息
+  # =========================================================================
+  structural:
+    description: "结构预训练：遮挡重建任务"
+    
     model:
-      full_heads: false
+      full_heads: false   # 只输出 skeleton + tangent
+    
     training:
       lr: 1e-3
-      mask_ratio: 0.6
+      epochs: 30
+      epoch_length: 8000
+      batch_size: 128
+      
+      # Masking 配置 (仅 structural 阶段)
+      mask_ratio: 0.6     # 遮挡比例
+      mask_strategy: "block"  # "block", "random", "stroke"
+      
+      scheduler:
+        type: "onecycle"
+        warmup_epochs: 3
+        pct_start: 0.1
+      
+      checkpoint:
+        save_dir: "checkpoints/structural"
+        monitor: "train/loss"  # 预训练无验证集
+        keep_top_k: 3
+      
+      # Loss 权重 (仅 skeleton + tangent)
+      loss_weights:
+        skeleton: 1.0
+        tangent: 1.0
+      
       curriculum:
-        enabled: false  # 预训练阶段不使用渐进训练
+        enabled: false    # 预训练不用 curriculum
+      
+      visualization:
+        enabled: true
+        num_samples: 4
+        log_interval: 2
+    
     data:
-      curriculum_stage: 2  # 使用稍复杂的数据
+      curriculum_stage: 2  # 中等复杂度预训练
+      num_workers: 8
 
-  - name: "dense"
-    epochs: 60
-    init_from: "best_structural.pth"  # 自动从前一个阶段加载
+  # =========================================================================
+  # Phase 2: Dense Prediction Training (密集预测训练)
+  # =========================================================================
+  # 目标：训练完整的 5-head 密集预测
+  # 方法：多任务学习 (Skeleton + Keypoints + Tangent + Width + Offset)
+  # 特点：从 structural checkpoint 初始化，使用 curriculum learning
+  # =========================================================================
+  dense:
+    description: "密集预测训练：多任务学习"
+    
+    # 权重初始化
+    init_from: "auto"     # "auto" = 使用上一阶段最优; 或指定路径
+    freeze_encoder: false # 是否冻结 Encoder (可用于迁移学习)
+    
     model:
-      full_heads: true
+      full_heads: true    # 输出全部 5 个头
+    
     training:
-      lr: 5e-4
+      lr: 5e-4            # 比预训练低，更稳定
+      epochs: 80
+      epoch_length: 10000
+      batch_size: 128
+      
+      scheduler:
+        type: "onecycle"
+        warmup_epochs: 3
+        pct_start: 0.05   # 更短的 warmup
+      
+      checkpoint:
+        save_dir: "checkpoints/dense"
+        monitor: "val/loss"
+        keep_top_k: 5
+      
+      # Loss 权重 (精调)
+      loss_weights:
+        skeleton: 10.0    # 最重要
+        keypoints: 5.0    # 关键点
+        tangent: 2.0      # 对曲线拟合重要
+        width: 1.0
+        offset: 1.0
+      
+      # Curriculum Learning
       curriculum:
         enabled: true
         start_stage: 0
         end_stage: 6
         epochs_per_stage: 10
+      
+      visualization:
+        enabled: true
+        num_samples: 4
+        log_interval: 1
+        log_metrics: true
+    
     data:
-      curriculum_stage: 0  # 从最简单开始
+      curriculum_stage: 0  # 从简单开始
+      num_workers: 8
+
+  # =========================================================================
+  # Phase 3: End-to-End Finetuning (端到端微调，可选)
+  # =========================================================================
+  finetune:
+    description: "端到端微调（可选）"
+    
+    init_from: "auto"
+    freeze_encoder: false
+    
+    model:
+      full_heads: true
+    
+    training:
+      lr: 1e-4            # 更低学习率
+      epochs: 20
+      epoch_length: 10000
+      batch_size: 128
+      
+      scheduler:
+        type: "cosine"
+        warmup_epochs: 1
+      
+      checkpoint:
+        save_dir: "checkpoints/finetune"
+        monitor: "val/loss"
+        keep_top_k: 3
+      
+      loss_weights:
+        skeleton: 10.0
+        keypoints: 5.0
+        tangent: 2.0
+        width: 1.0
+        offset: 1.0
+      
+      curriculum:
+        enabled: false    # 微调阶段不用 curriculum
+      
+      visualization:
+        enabled: true
+        num_samples: 4
+    
+    data:
+      curriculum_stage: 6  # 直接使用复杂数据
+
+  # =========================================================================
+  # Debug: 快速调试配置
+  # =========================================================================
+  debug:
+    description: "快速调试配置"
+    
+    model:
+      full_heads: true
+    
+    training:
+      lr: 1e-3
+      epochs: 3
+      epoch_length: 320   # 很小，快速迭代
+      batch_size: 32
+      
+      checkpoint:
+        save_dir: "checkpoints/debug"
+        keep_top_k: 1
+      
+      curriculum:
+        enabled: false
+      
+      visualization:
+        enabled: true
+        num_samples: 2
+        log_interval: 1
+    
+    data:
+      num_workers: 2
+      curriculum_stage: 0

@@ -1,102 +1,261 @@
-# 训练系统重构指南
+# InkTrace V5 训练指南
 
-## 🎯 问题总结
+## 🎯 训练系统概述
 
-原来的 `train_structural.py` 和 `train_dense.py` 存在以下问题：
+InkTrace V5 使用 PyTorch Lightning 构建了一个完整的多阶段训练系统，支持：
 
-1. **Checkpoint 管理混乱**
-   - 格式不一致（一个有 scheduler，一个没有）
-   - 缺少定期保存
-   - 没有自动清理
-   - train_dense.py 甚至没保存 config
-
-2. **配置管理分散**
-   - 超参数在：命令行参数、checkpoint 内、硬编码
-   - 没有配置文件
-   - 跨脚本需要手动保持参数一致
-
-3. **分阶段训练割裂**
-   - 需要手动运行两个脚本
-   - `--init_from` 和 `--resume` 容易混淆
-   - 模型架构切换缺少验证
-
-4. **大量代码重复**
-   - 训练循环逻辑几乎完全一样
-   - 参数定义、设备选择、dataloader 都是复制粘贴
+- **统一配置管理**: YAML 文件定义全局默认 + 阶段覆盖
+- **多阶段训练流水线**: structural → dense → finetune
+- **Curriculum Learning**: 从简单样本逐渐过渡到复杂样本
+- **自动 Checkpoint 管理**: Top-K + Last 保存策略
+- **混合精度训练**: FP16 AMP 加速
 
 ---
 
-## ✅ 新系统特性
+## 📁 配置文件结构
 
-### 1. 统一配置文件 (YAML)
+配置文件采用 **默认值 + 覆盖** 的设计模式：
 
 ```yaml
 # configs/default.yaml
+
+# 全局默认配置（所有阶段的基础）
 model:
   embed_dim: 128
   num_layers: 4
+  full_heads: true
 
 training:
   lr: 1e-3
-  batch_size: 32
+  batch_size: 128
   epochs: 50
-  save_interval: 5
-  keep_last_n: 3
+  # ... 更多参数
 
 data:
   img_size: 64
-  num_workers: 4
+  curriculum_stage: 0
+  # ...
 
-# 多阶段配置
+# 训练流水线
+pipeline:
+  order: ["structural", "dense"]
+  auto_transfer: true  # 自动传递权重
+
+# 阶段定义（覆盖默认配置）
 stages:
-  - name: "structural"
-    epochs: 30
+  structural:
     model:
-      full_heads: false
+      full_heads: false  # 覆盖默认值
     training:
-      mask_ratio: 0.6
+      epochs: 30
+      lr: 1e-3
+    # ...
 
-  - name: "dense"
-    epochs: 50
-    init_from: "best_structural.pth"
-    model:
-      full_heads: true
+  dense:
+    init_from: "auto"    # 自动使用上一阶段最优
+    training:
+      epochs: 80
+      lr: 5e-4
+    curriculum:
+      enabled: true
+    # ...
 ```
 
-### 2. 智能 checkpoint 管理
+---
 
-```python
-# 自动功能：
-✓ 定期保存（每 N epoch）
-✓ 保存最佳模型
-✓ 自动清理旧 checkpoint（保留最近 N 个）
-✓ 完整保存：model + optimizer + scheduler + config
-✓ 一键恢复训练
-```
+## 🚀 使用方法
 
-checkpoint 结构：
-```python
-{
-    "version": 1,
-    "epoch": 10,
-    "model_state_dict": ...,
-    "optimizer_state_dict": ...,
-    "scheduler_state_dict": ...,
-    "metric": 0.123,
-    "config": {...},  # 完整配置
-    "metadata": {"stage": "structural"},
-    "timestamp": "2024-01-01T12:00:00",
-}
-```
-
-### 3. 统一训练脚本
+### 1. 单阶段训练
 
 ```bash
-# 单阶段训练
-python train.py --config configs/default.yaml --stage structural
+# 结构预训练
+python train_pl.py --config configs/default.yaml --stage structural
 
-# 多阶段自动训练
-python train.py --config configs/default.yaml --run-all-stages
+# 密集预测训练
+python train_pl.py --config configs/default.yaml --stage dense
+
+# 从 checkpoint 初始化（迁移学习）
+python train_pl.py --config configs/default.yaml --stage dense \
+    --init_from checkpoints/structural/last.ckpt
+
+# 断点续训
+python train_pl.py --config configs/default.yaml --stage dense \
+    --resume checkpoints/dense/last.ckpt
+```
+
+### 2. 多阶段自动训练
+
+```bash
+# 运行完整流水线（structural -> dense）
+python train_pl.py --config configs/default.yaml --run-all-stages
+
+# 从中间阶段恢复
+python train_pl.py --config configs/default.yaml --run-all-stages \
+    --start-from dense
+```
+
+### 3. 快速调试
+
+```bash
+# 使用 debug 阶段配置（小数据集，快速迭代）
+python train_pl.py --config configs/default.yaml --stage debug
+```
+
+### 4. 命令行覆盖
+
+```bash
+# 覆盖学习率和训练轮数
+python train_pl.py --config configs/default.yaml --stage dense \
+    --lr 1e-4 --epochs 100 --batch_size 64
+```
+
+---
+
+## 📊 训练阶段说明
+
+### Phase 1: Structural Pretraining (结构预训练)
+
+**目标**: 让 Encoder 学会从残缺输入推断完整结构
+
+**方法**:
+- Masking + Reconstruction（类似 MAE）
+- 关闭跳连，强迫 Encoder 在 bottleneck 编码完整信息
+- 只输出 skeleton + tangent
+
+**推荐配置**:
+- `epochs: 30`
+- `lr: 1e-3`
+- `mask_ratio: 0.6`
+- `curriculum_stage: 2`（中等复杂度）
+
+### Phase 2: Dense Prediction (密集预测)
+
+**目标**: 训练完整的 5-head 密集预测
+
+**方法**:
+- 多任务学习 (Skeleton + Keypoints + Tangent + Width + Offset)
+- 从 structural checkpoint 初始化
+- 启用 Curriculum Learning
+
+**推荐配置**:
+- `epochs: 80`
+- `lr: 5e-4`
+- `curriculum: 0 -> 6, 10 epochs/stage`
+- `loss_weights: skeleton=10, keypoints=5, tangent=2, width=1, offset=1`
+
+### Phase 3: End-to-End Finetuning (可选)
+
+**目标**: 全模型微调，适应极端情况
+
+**方法**:
+- 解冻 Encoder
+- 低学习率全局微调
+- 使用复杂数据
+
+**推荐配置**:
+- `epochs: 20`
+- `lr: 1e-4`
+- `curriculum_stage: 6`（复杂数据）
+
+---
+
+## 🎓 Curriculum Learning
+
+渐进式训练从简单样本逐渐过渡到复杂样本：
+
+| Stage | 描述 | 样本复杂度 |
+|-------|------|------------|
+| 0 | 单笔画 | ★☆☆☆☆ |
+| 1-3 | 多独立笔画 | ★★☆☆☆ |
+| 4-6 | 多段连续笔画 | ★★★☆☆ |
+| 7-9 | 混合模式 | ★★★★★ |
+
+配置示例：
+```yaml
+curriculum:
+  enabled: true
+  start_stage: 0
+  end_stage: 6
+  epochs_per_stage: 10  # 每 10 epoch 升级一次
+```
+
+---
+
+## 📈 监控与可视化
+
+### TensorBoard
+
+```bash
+tensorboard --logdir runs/
+```
+
+记录的指标：
+- `train/loss`: 总训练损失
+- `train/loss_skel`, `train/loss_keys`, etc.: 各任务损失
+- `val/loss`: 验证损失
+- `val/iou`, `val/precision`, `val/recall`, `val/f1`: 骨架分割指标
+- `val/kp_topo_recall`, `val/kp_geo_recall`: 关键点召回率
+- `curriculum/stage`: 当前 curriculum 阶段
+- `train/grad_norm`: 梯度范数（每 100 步）
+
+### 可视化回调
+
+自动生成对比图：输入图像 | GT | 预测
+
+配置：
+```yaml
+visualization:
+  enabled: true
+  num_samples: 4
+  log_interval: 1  # 每个 epoch
+```
+
+---
+
+## 💾 Checkpoint 管理
+
+### 保存策略
+
+```yaml
+checkpoint:
+  save_dir: "checkpoints/dense"
+  keep_top_k: 3        # 保留最优的 3 个
+  save_last: true      # 始终保存 last.ckpt
+  monitor: "val/loss"  # 监控指标
+  mode: "min"          # 越小越好
+```
+
+### 文件结构
+
+```
+checkpoints/
+├── structural/
+│   ├── epoch10-train_loss0.1234.ckpt
+│   ├── epoch20-train_loss0.0987.ckpt
+│   └── last.ckpt
+└── dense/
+    ├── epoch30-val_loss0.0567.ckpt
+    ├── epoch40-val_loss0.0456.ckpt
+    └── last.ckpt
+```
+
+---
+
+## ⚙️ Loss 权重调优
+
+各任务 Loss 的推荐权重：
+
+| 任务 | 权重 | 说明 |
+|------|------|------|
+| skeleton | 10.0 | 最重要，骨架分割 |
+| keypoints | 5.0 | 关键点检测 |
+| tangent | 2.0 | 切向场，对曲线拟合重要 |
+| width | 1.0 | 宽度预测 |
+| offset | 1.0 | 亚像素偏移 |
+
+---
+
+## 🔧 常见问题
 
 # 恢复训练（自动检测配置）
 python train.py --resume checkpoints/structural/checkpoint_latest.pth

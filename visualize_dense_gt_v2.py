@@ -1,24 +1,29 @@
 """
 Dense GT Maps 可视化工具 v2
 
-可视化 Rust 生成的 Dense GT Maps:
+可视化训练数据集（使用 datasets_v2.py）生成的 Dense GT Maps:
 - skeleton: 骨架图
-- keypoints: 关键点图 (2通道: 拓扑节点 + 几何锚点)
+- keypoints: 关键点图 (2通道: 拓扑节点 + 几何锚点) - 高斯热力图格式
 - tangent: 切向场 (HSV 颜色编码)
 - width: 宽度图
 - offset: 亚像素偏移
 
+默认启用从高斯热力图提取关键点并标记。
+
 用法:
-    python visualize_dense_gt_v2.py                 # 可视化单个样本
-    python visualize_dense_gt_v2.py --all-stages    # 可视化所有阶段
-    python visualize_dense_gt_v2.py --stage 5       # 可视化指定阶段
+    python visualize_dense_gt_v2.py                      # 可视化默认阶段
+    python visualize_dense_gt_v2.py --stage 5            # 可视化指定阶段
+    python visualize_dense_gt_v2.py --kp-threshold 0.2   # 调整关键点阈值
+    python visualize_dense_gt_v2.py --no-extract-kps     # 禁用关键点标记
 """
 
 import matplotlib.pyplot as plt
 import numpy as np
-import ink_trace_rs
+import torch
 import argparse
 import colorsys
+from datasets_v2 import DenseInkTraceDataset
+from inference_tool import extract_keypoints
 
 
 def tangent_to_rgb(cos2t: np.ndarray, sin2t: np.ndarray, skeleton: np.ndarray = None):
@@ -56,25 +61,47 @@ def tangent_to_rgb(cos2t: np.ndarray, sin2t: np.ndarray, skeleton: np.ndarray = 
     return rgb
 
 
-def visualize_dense_batch(batch: dict, idx: int = 0, save_path: str = None):
+def visualize_dense_batch(
+    img: torch.Tensor,
+    targets: dict,
+    save_path: str = None,
+    extract_keypoints_flag: bool = True,
+    kp_threshold: float = 0.1,
+    kp_topk: int = 100,
+):
     """
     可视化单个样本的 Dense GT Maps
 
     Args:
-        batch: Rust 生成的数据批次
-        idx: 批次中的样本索引
+        img: 图像 tensor [1, H, W]
+        targets: 包含 Dense GT Maps 的字典
         save_path: 保存路径 (None 则显示)
+        extract_keypoints_flag: 是否标记提取的关键点
+        kp_threshold: 关键点提取的置信度阈值（只保留热力图值>该阈值的点）
+        kp_topk: 每个通道最多提取的点数
     """
-    img = batch["image"][idx]
-    skeleton = batch["skeleton"][idx]
-    keypoints = batch["keypoints"][idx]  # [2, H, W]
-    tangent = batch["tangent"][idx]
-    width = batch["width"][idx]
-    offset = batch["offset"][idx]
+    # 转换为 numpy 数组
+    img = img.squeeze(0).cpu().numpy()
+    skeleton = targets["skeleton"].squeeze(0).cpu().numpy()
+    keypoints = targets["keypoints"].cpu().numpy()  # [2, H, W]
+    tangent = targets["tangent"].cpu().numpy()  # [2, H, W]
+    width = targets["width"].squeeze(0).cpu().numpy()
+    offset = targets["offset"].cpu().numpy()  # [2, H, W]
 
     # 分离 keypoints 两个通道
     topo_keypoints = keypoints[0]  # 拓扑节点
     geom_keypoints = keypoints[1]  # 几何锚点
+
+    # 提取关键点（如果启用）
+    topo_kps = None
+    geom_kps = None
+    if extract_keypoints_flag:
+        heatmap_batch = targets["keypoints"].unsqueeze(0)  # [1, 2, H, W]
+        keypoints_list = extract_keypoints(
+            heatmap_batch, kernel_size=3, threshold=kp_threshold, topk=kp_topk
+        )
+        topo_kps = keypoints_list[0][0].cpu().numpy()  # [N, 3] = (y, x, score)
+        geom_kps = keypoints_list[0][1].cpu().numpy()  # [N, 3]
 
     # 创建图形 (3x3)
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
@@ -94,6 +121,17 @@ def visualize_dense_batch(batch: dict, idx: int = 0, save_path: str = None):
     kp_rgb[..., 1] = geom_keypoints  # Green: 几何锚点
     kp_rgb[..., 2] = 0.2 * skeleton  # Blue: 骨架轮廓
     axes[0, 2].imshow(kp_rgb.clip(0, 1))
+
+    # 标记提取的关键点
+    if topo_kps is not None and len(topo_kps) > 0:
+        for y, x, score in topo_kps:
+            circle = plt.Circle((x, y), radius=2.5, color="red", alpha=0.6, fill=False, linewidth=2)
+            axes[0, 2].add_patch(circle)
+    if geom_kps is not None and len(geom_kps) > 0:
+        for y, x, score in geom_kps:
+            circle = plt.Circle((x, y), radius=2.5, color="lime", alpha=0.6, fill=False, linewidth=2)
+            axes[0, 2].add_patch(circle)
+
     axes[0, 2].set_title("Keypoints (R=Topo, G=Geom)")
     axes[0, 2].axis("off")
 
@@ -106,10 +144,18 @@ def visualize_dense_batch(batch: dict, idx: int = 0, save_path: str = None):
     # Row 2
     # 分别显示两个 keypoints 通道
     axes[1, 0].imshow(topo_keypoints, cmap="Reds", vmin=0, vmax=1)
+    if topo_kps is not None and len(topo_kps) > 0:
+        for y, x, score in topo_kps:
+            circle = plt.Circle((x, y), radius=2.5, color="red", alpha=0.6, fill=False, linewidth=2)
+            axes[1, 0].add_patch(circle)
     axes[1, 0].set_title(f"Topo Keypoints (sum={topo_keypoints.sum():.1f})")
     axes[1, 0].axis("off")
 
     axes[1, 1].imshow(geom_keypoints, cmap="Greens", vmin=0, vmax=1)
+    if geom_kps is not None and len(geom_kps) > 0:
+        for y, x, score in geom_kps:
+            circle = plt.Circle((x, y), radius=2.5, color="lime", alpha=0.6, fill=False, linewidth=2)
+            axes[1, 1].add_patch(circle)
     axes[1, 1].set_title(f"Geom Keypoints (sum={geom_keypoints.sum():.1f})")
     axes[1, 1].axis("off")
 
@@ -133,75 +179,10 @@ def visualize_dense_batch(batch: dict, idx: int = 0, save_path: str = None):
         plt.show()
 
 
-def visualize_all_stages(img_size: int = 64, save_dir: str = None):
-    """可视化所有训练阶段的样本"""
-    stages = ink_trace_rs.list_stages()
-
-    fig, axes = plt.subplots(5, 10, figsize=(24, 12))
-
-    for stage_info in stages:
-        stage = stage_info["stage"]
-        batch = ink_trace_rs.generate_dense_batch(1, img_size, stage)
-
-        col = stage
-        img = batch["image"][0]
-        skeleton = batch["skeleton"][0]
-        keypoints = batch["keypoints"][0]
-        tangent = batch["tangent"][0]
-        width = batch["width"][0]
-
-        topo_kp = keypoints[0]
-        geom_kp = keypoints[1]
-
-        # Row 0: Image
-        axes[0, col].imshow(img, cmap="gray")
-        axes[0, col].set_title(f"S{stage}", fontsize=8)
-        axes[0, col].axis("off")
-
-        # Row 1: Skeleton
-        axes[1, col].imshow(skeleton, cmap="gray")
-        axes[1, col].axis("off")
-
-        # Row 2: Keypoints RGB
-        kp_rgb = np.zeros((*skeleton.shape, 3))
-        kp_rgb[..., 0] = topo_kp
-        kp_rgb[..., 1] = geom_kp
-        axes[2, col].imshow(kp_rgb.clip(0, 1))
-        axes[2, col].axis("off")
-
-        # Row 3: Tangent
-        tangent_rgb = tangent_to_rgb(tangent[0], tangent[1], skeleton)
-        axes[3, col].imshow(tangent_rgb)
-        axes[3, col].axis("off")
-
-        # Row 4: Width
-        axes[4, col].imshow(width * skeleton, cmap="viridis")
-        axes[4, col].axis("off")
-
-    # Row labels
-    row_labels = ["Image", "Skeleton", "Keypoints", "Tangent", "Width"]
-    for i, label in enumerate(row_labels):
-        axes[i, 0].set_ylabel(label, fontsize=10)
-
-    plt.suptitle("Curriculum Learning Stages (0-9)", fontsize=14)
-    plt.tight_layout()
-
-    if save_dir:
-        import os
-
-        os.makedirs(save_dir, exist_ok=True)
-        path = os.path.join(save_dir, "all_stages.png")
-        plt.savefig(path, dpi=150, bbox_inches="tight")
-        print(f"Saved to {path}")
-        plt.close()
-    else:
-        plt.show()
-
-
-def verify_tangent_consistency(batch: dict, idx: int = 0):
+def verify_tangent_consistency(targets: dict):
     """验证切向场的一致性（双倍角表示）"""
-    tangent = batch["tangent"][idx]
-    skeleton = batch["skeleton"][idx]
+    tangent = targets["tangent"].cpu().numpy()
+    skeleton = targets["skeleton"].squeeze(0).cpu().numpy()
 
     cos2t = tangent[0]
     sin2t = tangent[1]
@@ -229,39 +210,65 @@ def verify_tangent_consistency(batch: dict, idx: int = 0):
 def main():
     parser = argparse.ArgumentParser(description="Dense GT Maps 可视化工具 v2")
     parser.add_argument("--stage", type=int, default=0, help="训练阶段 (0-9)")
-    parser.add_argument("--all-stages", action="store_true", help="可视化所有阶段")
     parser.add_argument("--img-size", type=int, default=64, help="图像尺寸")
     parser.add_argument("--save", type=str, default=None, help="保存目录")
     parser.add_argument("--verify", action="store_true", help="验证切向场一致性")
+    parser.add_argument("--keypoint-sigma", type=float, default=1.5, help="高斯热力图标准差")
+    parser.add_argument(
+        "--no-extract-kps",
+        action="store_true",
+        help="禁用关键点提取标记（默认启用）",
+    )
+    parser.add_argument(
+        "--kp-threshold",
+        type=float,
+        default=0.1,
+        help="关键点提取的置信度阈值（只保留热力图值>该阈值的点）",
+    )
+    parser.add_argument("--kp-topk", type=int, default=100, help="每个通道最多提取的点数")
     args = parser.parse_args()
 
-    if args.all_stages:
-        visualize_all_stages(args.img_size, args.save)
-    else:
-        # 生成单个阶段的数据
-        stage_info = ink_trace_rs.get_stage_info(args.stage)
-        print(f"Stage {args.stage}: {stage_info['name']} ({stage_info['mode']})")
+    # 使用 dataset 生成单个阶段的数据
+    dataset = DenseInkTraceDataset(
+        img_size=args.img_size,
+        batch_size=4,
+        epoch_length=4,
+        curriculum_stage=args.stage,
+        keypoint_sigma=args.keypoint_sigma,
+    )
 
-        batch = ink_trace_rs.generate_dense_batch(4, args.img_size, args.stage)
-        print(f"Generated batch shapes:")
-        print(f"  image:     {batch['image'].shape}")
-        print(f"  skeleton:  {batch['skeleton'].shape}")
-        print(f"  keypoints: {batch['keypoints'].shape}")
-        print(f"  tangent:   {batch['tangent'].shape}")
-        print(f"  width:     {batch['width'].shape}")
-        print(f"  offset:    {batch['offset'].shape}")
+    stage_info = dataset.stage_info
+    print(f"Stage {args.stage}: {stage_info['name']} ({stage_info['mode']})")
 
-        if args.verify:
-            verify_tangent_consistency(batch, 0)
+    # 获取第一个样本
+    img, targets = next(iter(dataset))
 
-        save_path = None
-        if args.save:
-            import os
+    print(f"Sample shapes:")
+    print(f"  image:     {img.shape}")
+    print(f"  skeleton:  {targets['skeleton'].shape}")
+    print(f"  keypoints: {targets['keypoints'].shape}")
+    print(f"  tangent:   {targets['tangent'].shape}")
+    print(f"  width:     {targets['width'].shape}")
+    print(f"  offset:    {targets['offset'].shape}")
 
-            os.makedirs(args.save, exist_ok=True)
-            save_path = os.path.join(args.save, f"stage_{args.stage}.png")
+    if args.verify:
+        verify_tangent_consistency(targets)
 
-        visualize_dense_batch(batch, 0, save_path)
+    save_path = None
+    if args.save:
+        import os
+
+        os.makedirs(args.save, exist_ok=True)
+        save_path = os.path.join(args.save, f"stage_{args.stage}.png")
+
+    visualize_dense_batch(
+        img,
+        targets,
+        save_path=save_path,
+        extract_keypoints_flag=not args.no_extract_kps,
+        kp_threshold=args.kp_threshold,
+        kp_topk=args.kp_topk,
+    )
 
 
 if __name__ == "__main__":
