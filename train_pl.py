@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 import yaml
+import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import (
     ModelCheckpoint,
@@ -677,6 +678,9 @@ Examples:
 
 def main():
     args = parse_args()
+
+    # 设置 float32 矩阵乘法精度以利用 Tensor Cores (RTX 5090 优化)
+    torch.set_float32_matmul_precision("high")
 
     # 加载配置
     config = load_config(args.config)
