@@ -242,9 +242,8 @@ def create_trainer(
         logger=logger,
         # 日志频率
         log_every_n_steps=logging_config.get("log_interval", 10),
-        # 验证频率
-        val_check_interval=logging_config.get("vis_interval", 2),
-        check_val_every_n_epoch=logging_config.get("vis_interval", 2),
+        # 验证频率：每个epoch结束验证一次
+        check_val_every_n_epoch=1,
         # 性能优化
         enable_model_summary=True,
         enable_progress_bar=True,
