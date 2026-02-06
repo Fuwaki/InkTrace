@@ -41,10 +41,10 @@ class StrokeEncoder(nn.Module):
 
     def __init__(
         self,
-        in_channels=1,  # 单通道灰度图
-        embed_dim=192,  # embedding 维度 (降低以匹配通道数)
-        num_heads=4,  # Transformer 注意力头数
-        num_layers=6,  # Transformer 层数 (增加以充分利用 token)
+        in_channels=1,      # 单通道灰度图
+        embed_dim=192,      # embedding 维度 (与 configs/default.yaml 一致)
+        num_heads=6,        # Transformer 注意力头数
+        num_layers=4,       # Transformer 层数 (与 configs/default.yaml 一致)
         dropout=0.1,
     ):
         super().__init__()

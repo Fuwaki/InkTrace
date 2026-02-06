@@ -240,8 +240,8 @@ class ModelFactory:
 
     @staticmethod
     def create_unified_model(
-        embed_dim=128,
-        num_heads=4,
+        embed_dim=192,
+        num_heads=6,
         num_layers=4,
         full_heads=True,
         device="cpu",
@@ -253,7 +253,7 @@ class ModelFactory:
         Args:
             embed_dim: Encoder embedding 维度
             num_heads: Transformer 注意力头数
-            num_layers: Transformer 层数 (建议 2-4，不要太深)
+            num_layers: Transformer 层数 (与 configs/default.yaml 一致)
             full_heads: 是否输出全部 5 个头
             device: 设备
             encoder_ckpt: 预训练 Encoder 权重路径
@@ -293,8 +293,8 @@ class ModelFactory:
 
         # 从 checkpoint 获取配置，或使用默认值
         config = checkpoint.get("config", {})
-        embed_dim = config.get("embed_dim", 128)
-        num_layers = config.get("num_layers", 4)
+        embed_dim = config.get("embed_dim", 192)  # 与 configs/default.yaml 一致
+        num_layers = config.get("num_layers", 4)   # 与 configs/default.yaml 一致
 
         model = ModelFactory.create_unified_model(
             embed_dim=embed_dim,

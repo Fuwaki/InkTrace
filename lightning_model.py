@@ -44,8 +44,8 @@ class UnifiedTask(pl.LightningModule):
     def __init__(
         self,
         stage: Literal["structural", "dense"] = "dense",
-        embed_dim: int = 128,
-        num_layers: int = 4,
+        embed_dim: int = 192,  # 与 configs/default.yaml 一致
+        num_layers: int = 4,   # 与 configs/default.yaml 一致
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
         loss_weights: Optional[Dict[str, float]] = None,
@@ -350,8 +350,8 @@ class UnifiedTask(pl.LightningModule):
 
         # 从 checkpoint 获取模型配置，但使用新的 stage
         model_kwargs = {
-            "embed_dim": hparams.get("embed_dim", 128),
-            "num_layers": hparams.get("num_layers", 4),
+            "embed_dim": hparams.get("embed_dim", 192),  # 与 configs/default.yaml 一致
+            "num_layers": hparams.get("num_layers", 4),   # 与 configs/default.yaml 一致
             "stage": stage,  # 使用新的 stage
         }
         model_kwargs.update(kwargs)

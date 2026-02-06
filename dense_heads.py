@@ -142,8 +142,8 @@ class DenseHeads(nn.Module):
             # Branch 2: Geometric Tasks (ASPP + Coord)
             # ==========================================
             # Input: in_channels + 2 (X, Y coords)
-            # ASPP output: 32 channels (节省参数)
-            self.geo_aspp = ASPP(in_channels=in_channels + 2, out_channels=32)
+            # ASPP output: 48 channels (节省参数)
+            self.geo_aspp = ASPP(in_channels=in_channels + 2, out_channels=48)
 
             # 5. Keypoints Map (2ch, Sigmoid)
             #    Ch0: Topological nodes (endpoints, junctions) - MUST break
@@ -157,7 +157,7 @@ class DenseHeads(nn.Module):
             #    推理流程：
             #      - 使用 keypoint_nms() + extract_keypoints() 提取离散点
             #      - 返回坐标 (y, x, score)
-            self.keypoints = nn.Sequential(nn.Conv2d(32, 2, 1), nn.Sigmoid())
+            self.keypoints = nn.Sequential(nn.Conv2d(48, 2, 1), nn.Sigmoid())
 
         self._init_weights()
 

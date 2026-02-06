@@ -497,13 +497,13 @@ def run_stage(
 
     model = UnifiedTask(
         stage=stage_name if stage_name != "debug" else "dense",
-        embed_dim=int(model_config.get("embed_dim", 128)),
+        embed_dim=int(model_config.get("embed_dim", 192)),
         num_layers=int(model_config.get("num_layers", 4)),
         lr=float(training_config.get("lr", 1e-3)),
         weight_decay=float(training_config.get("weight_decay", 1e-4)),
         loss_weights=training_config.get("loss_weights"),
-        mask_ratio=float(training_config.get("mask_ratio", 0.6)),
-        mask_strategy=training_config.get("mask_strategy", "block"),
+        mask_ratio=float(model_config.get("mask_ratio", 0.6)),
+        mask_strategy=model_config.get("mask_strategy", "block"),
         grad_clip=float(training_config.get("grad_clip", 1.0)),
         scheduler_type=scheduler_config.get("type", "onecycle"),
         warmup_epochs=int(scheduler_config.get("warmup_epochs", 2)),
