@@ -51,9 +51,9 @@ training:
   # 基础训练参数
   # ----------------------------------------------------------------------
   lr: 1e-3                # 初始学习率
-  batch_size: 128         # 批次大小
+  batch_size: 256         # 🔥 批次大小 (优化：5090 大显存)
   epochs: 50              # 训练轮数
-  epoch_length: 10000     # 每个 epoch 的样本数
+  epoch_length: 50000     # 🔥 每个 epoch 的样本数 (增加数据量)
 
   # 优化器参数
   weight_decay: 1e-4      # AdamW 权重衰减
@@ -64,7 +64,7 @@ training:
   # ----------------------------------------------------------------------
   scheduler:
     type: "onecycle"      # 调度器类型: "onecycle" | "cosine" | "constant"
-    warmup_epochs: 2      # 预热轮数
+    warmup_epochs: 3      # 预热轮数 (稍长)
     pct_start: 0.1        # OneCycleLR: warmup 占总步数比例
 
   # ----------------------------------------------------------------------
@@ -72,7 +72,7 @@ training:
   # ----------------------------------------------------------------------
   checkpoint:
     save_dir: "checkpoints"
-    keep_top_k: 3         # 保留 top-k 最优 checkpoint
+    keep_top_k: 5         # 保留 top-k 最优 checkpoint
     save_last: true       # 始终保存 last.ckpt
     monitor: "val/loss"   # 监控指标
     mode: "min"           # 优化方向: "min" | "max"
@@ -94,14 +94,14 @@ training:
     enabled: false        # 默认关闭，在具体阶段开启
     start_stage: 0        # 起始阶段 (0-9)
     end_stage: 6          # 结束阶段 (建议 6)
-    epochs_per_stage: 10  # 每个阶段训练轮数
+    epochs_per_stage: 15  # 🔥 每个阶段训练轮数 (每阶段学久一点)
 
   # ----------------------------------------------------------------------
   # 可视化配置
   # ----------------------------------------------------------------------
   visualization:
     enabled: true
-    num_samples: 4        # 每次可视化样本数
+    num_samples: 8        # 🔥 更多可视化样本
     log_interval: 1       # 每 N epoch 可视化一次
     log_metrics: true     # 记录 IoU/Precision/Recall
 
@@ -114,29 +114,29 @@ data:
   # ----------------------------------------------------------------------
   # DataLoader 配置
   # ----------------------------------------------------------------------
-  batch_size: 128         # 批次大小 (与 training.batch_size 保持一致)
-  num_workers: 8          # DataLoader worker 数量
+  batch_size: 256         # 🔥 批次大小 (与 training.batch_size 保持一致)
+  num_workers: 14         # 🔥 DataLoader worker 数量 (16C 优化)
   pin_memory: true        # 是否使用 pin_memory (加速 GPU 传输)
   persistent_workers: true # 保持 worker 进程 (减少启动开销)
 
   # ----------------------------------------------------------------------
   # 数据生成配置
   # ----------------------------------------------------------------------
-  rust_threads: null      # Rust 生成器线程数 (null=自动)
+  rust_threads: 16        # 🔥 Rust 生成器线程数 (CPU 满载)
   curriculum_stage: 0     # 初始 curriculum 阶段 (0-9)
 
   # ----------------------------------------------------------------------
   # Ground Truth 生成
   # ----------------------------------------------------------------------
-  keypoint_sigma: 1.5     # 高斯热力图标准差 (关键点)
+  keypoint_sigma: 2.0     # 🔥 高斯热力图标准差 (更平滑，抗噪声)
 
 logging:
-  log_interval: 10        # 每 N step 记录一次
+  log_interval: 20        # 🔥 每 N step 记录一次 (batch 变大，频率降低)
   tensorboard_dir: "runs" # TensorBoard 日志目录
 
 device:
-  accelerator: "auto"     # 加速器: "auto" | "gpu" | "cpu" | "mps"
-  precision: "16-mixed"   # 精度: "32" | "16-mixed" | "bf16-mixed"
+  accelerator: "gpu"      # 🔥 加速器: 强制 GPU
+  precision: "bf16-mixed" # 🔥 精度: BF16 (5090 最佳)
 
 
 # =============================================================================
@@ -181,13 +181,13 @@ stages:
 
     training:
       lr: 1e-3
-      epochs: 30
-      epoch_length: 8000
-      batch_size: 128
+      epochs: 40          # 🔥 增加轮数适应大数据
+      epoch_length: 40000 # 🔥 4x 数据量 (1.6M total)
+      batch_size: 256
 
       scheduler:
         type: "onecycle"
-        warmup_epochs: 3
+        warmup_epochs: 5
         pct_start: 0.1
 
       checkpoint:
@@ -205,12 +205,13 @@ stages:
 
       visualization:
         enabled: true
-        num_samples: 4
+        num_samples: 8
         log_interval: 2
 
     data:
       curriculum_stage: 2  # 中等复杂度预训练
-      num_workers: 8
+      num_workers: 14
+      rust_threads: 16
 
   # =========================================================================
   # Phase 2: Dense Prediction Training (密集预测训练)
@@ -231,13 +232,13 @@ stages:
 
     training:
       lr: 5e-4            # 比预训练低，更稳定
-      epochs: 80
-      epoch_length: 10000
-      batch_size: 128
+      epochs: 90         # 🔥 增加轮数
+      epoch_length: 60000 # 🔥 6x 数据量 (6M total)
+      batch_size: 256
 
       scheduler:
         type: "onecycle"
-        warmup_epochs: 3
+        warmup_epochs: 5
         pct_start: 0.05   # 更短的 warmup
 
       checkpoint:
@@ -258,17 +259,18 @@ stages:
         enabled: true
         start_stage: 0
         end_stage: 6
-        epochs_per_stage: 10
+        epochs_per_stage: 15 # 🔥 每阶段训练久一点
 
       visualization:
         enabled: true
-        num_samples: 4
+        num_samples: 8
         log_interval: 1
         log_metrics: true
 
     data:
       curriculum_stage: 0  # 从简单开始
-      num_workers: 8
+      num_workers: 14
+      rust_threads: 16
 
   # =========================================================================
   # Phase 3: End-to-End Finetuning (端到端微调，可选)
@@ -285,8 +287,8 @@ stages:
     training:
       lr: 1e-4            # 更低学习率
       epochs: 20
-      epoch_length: 10000
-      batch_size: 128
+      epoch_length: 50000
+      batch_size: 256
 
       scheduler:
         type: "cosine"
@@ -309,7 +311,7 @@ stages:
 
       visualization:
         enabled: true
-        num_samples: 4
+        num_samples: 8
 
     data:
       curriculum_stage: 6  # 直接使用复杂数据
