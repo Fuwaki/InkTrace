@@ -31,7 +31,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from models import ModelFactory
-from datasets_v2 import DenseInkTraceDataset
+from datasets_v2 import DenseInkTraceDataset, collate_dense_batch
 
 
 # =============================================================================
@@ -42,7 +42,7 @@ from datasets_v2 import DenseInkTraceDataset
 def visualize_prediction(img, pred, target, save_path, idx=0):
     """
     Visualize prediction vs target for one sample.
-    Saves a 3x3 grid: Input, Skeletons, Keypoints, Tangents, Width, Overlay.
+    Shows ALL output heads: Skeleton, Keypoints (Topo/Geo), Tangent, Width, Offset
 
     Args:
         img: [1, H, W] input image tensor
@@ -69,56 +69,121 @@ def visualize_prediction(img, pred, target, save_path, idx=0):
     vis_pred_tan = _vis_tangent(pred_tan, pred_skel)
     vis_tgt_tan = _vis_tangent(tgt_tan, tgt_skel)
 
-    rows, cols = 3, 3
-    fig, axes = plt.subplots(rows, cols, figsize=(10, 10))
+    # Keypoints: [2, H, W] - ch0=topo, ch1=geo
+    tgt_kp = target["keypoints"][0].cpu().numpy()
+    pred_kp = pred["keypoints"][0].cpu().numpy()
 
-    # Row 1: Input, Target Skeleton, Pred Skeleton
+    # Width: [1, H, W]
+    pred_width = pred["width"][0, 0].cpu().numpy()
+    tgt_width = target["width"][0, 0].cpu().numpy()
+
+    # Offset: [2, H, W]
+    pred_offset = pred["offset"][0].cpu().numpy()
+    tgt_offset = target["offset"][0].cpu().numpy()
+
+    # Create 4x5 grid for comprehensive visualization
+    rows, cols = 4, 5
+    fig, axes = plt.subplots(rows, cols, figsize=(15, 12))
+
+    # Row 1: Input, Skeleton GT, Skeleton Pred, Overlay GT, Overlay Pred
     axes[0, 0].imshow(img_np, cmap="gray")
     axes[0, 0].set_title("Input")
     axes[0, 0].axis("off")
 
     axes[0, 1].imshow(tgt_skel, cmap="gray")
-    axes[0, 1].set_title("Target Skeleton")
+    axes[0, 1].set_title("GT Skeleton")
     axes[0, 1].axis("off")
 
     axes[0, 2].imshow(pred_skel, cmap="gray")
     axes[0, 2].set_title("Pred Skeleton")
     axes[0, 2].axis("off")
 
-    # Row 2: Target Keypoints (topo + geo), Pred Keypoints, Width
-    # keypoints: [2, H, W] - ch0=topo, ch1=geo
-    tgt_kp = target["keypoints"][0].cpu().numpy()  # [2, H, W]
-    pred_kp = pred["keypoints"][0].cpu().numpy()
+    # Overlay GT
+    overlay_gt = np.stack([img_np, img_np, img_np], axis=-1)
+    overlay_gt[tgt_skel > 0.5] = [0, 1, 0]
+    axes[0, 3].imshow(overlay_gt)
+    axes[0, 3].set_title("Overlay GT")
+    axes[0, 3].axis("off")
 
-    # Visualize combined keypoints (max of both channels)
-    axes[1, 0].imshow(np.maximum(tgt_kp[0], tgt_kp[1]), cmap="magma")
-    axes[1, 0].set_title("Target Keypoints")
+    # Overlay Pred
+    overlay_pred = np.stack([img_np, img_np, img_np], axis=-1)
+    overlay_pred[pred_skel > 0.5] = [1, 0, 0]
+    axes[0, 4].imshow(overlay_pred)
+    axes[0, 4].set_title("Overlay Pred")
+    axes[0, 4].axis("off")
+
+    # Row 2: Keypoints - Topo GT, Topo Pred, Geo GT, Geo Pred, Combined
+    axes[1, 0].imshow(tgt_kp[0], cmap="magma", vmin=0, vmax=1)
+    axes[1, 0].set_title("GT KP Topo")
     axes[1, 0].axis("off")
 
-    axes[1, 1].imshow(np.maximum(pred_kp[0], pred_kp[1]), cmap="magma")
-    axes[1, 1].set_title("Pred Keypoints")
+    axes[1, 1].imshow(pred_kp[0], cmap="magma", vmin=0, vmax=1)
+    axes[1, 1].set_title("Pred KP Topo")
     axes[1, 1].axis("off")
 
-    # Width comparison (masked by pred skeleton)
-    axes[1, 2].imshow(pred["width"][0, 0].cpu().numpy() * pred_skel, cmap="viridis")
-    axes[1, 2].set_title("Pred Width")
+    axes[1, 2].imshow(tgt_kp[1], cmap="magma", vmin=0, vmax=1)
+    axes[1, 2].set_title("GT KP Geo")
     axes[1, 2].axis("off")
 
-    # Row 3: Tangents and Overlay
+    axes[1, 3].imshow(pred_kp[1], cmap="magma", vmin=0, vmax=1)
+    axes[1, 3].set_title("Pred KP Geo")
+    axes[1, 3].axis("off")
+
+    # Combined keypoints overlay
+    kp_overlay = np.zeros((img_np.shape[0], img_np.shape[1], 3))
+    kp_overlay[..., 0] = np.maximum(pred_kp[0], pred_kp[1])  # Red: pred
+    kp_overlay[..., 1] = np.maximum(tgt_kp[0], tgt_kp[1])  # Green: GT
+    axes[1, 4].imshow(kp_overlay)
+    axes[1, 4].set_title("KP Overlay (R=Pred,G=GT)")
+    axes[1, 4].axis("off")
+
+    # Row 3: Tangent GT, Tangent Pred, Width GT, Width Pred, Width Diff
     axes[2, 0].imshow(vis_tgt_tan)
-    axes[2, 0].set_title("Target Tangent")
+    axes[2, 0].set_title("GT Tangent")
     axes[2, 0].axis("off")
 
     axes[2, 1].imshow(vis_pred_tan)
     axes[2, 1].set_title("Pred Tangent")
     axes[2, 1].axis("off")
 
-    # Overlay: Skeleton on Input
-    overlay = np.stack([img_np, img_np, img_np], axis=-1)
-    overlay[pred_skel > 0.5] = [1, 0, 0]
-    axes[2, 2].imshow(overlay)
-    axes[2, 2].set_title("Overlay")
+    axes[2, 2].imshow(tgt_width * tgt_skel, cmap="viridis")
+    axes[2, 2].set_title("GT Width")
     axes[2, 2].axis("off")
+
+    axes[2, 3].imshow(pred_width * pred_skel, cmap="viridis")
+    axes[2, 3].set_title("Pred Width")
+    axes[2, 3].axis("off")
+
+    # Width difference (masked)
+    width_diff = np.abs(pred_width - tgt_width) * np.maximum(pred_skel, tgt_skel)
+    axes[2, 4].imshow(width_diff, cmap="hot")
+    axes[2, 4].set_title("Width Diff")
+    axes[2, 4].axis("off")
+
+    # Row 4: Offset X GT, Offset X Pred, Offset Y GT, Offset Y Pred, Offset Magnitude
+    axes[3, 0].imshow(tgt_offset[0] * tgt_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+    axes[3, 0].set_title("GT Offset X")
+    axes[3, 0].axis("off")
+
+    axes[3, 1].imshow(pred_offset[0] * pred_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+    axes[3, 1].set_title("Pred Offset X")
+    axes[3, 1].axis("off")
+
+    axes[3, 2].imshow(tgt_offset[1] * tgt_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+    axes[3, 2].set_title("GT Offset Y")
+    axes[3, 2].axis("off")
+
+    axes[3, 3].imshow(pred_offset[1] * pred_skel, cmap="coolwarm", vmin=-0.5, vmax=0.5)
+    axes[3, 3].set_title("Pred Offset Y")
+    axes[3, 3].axis("off")
+
+    # Offset magnitude comparison
+    tgt_off_mag = np.sqrt(tgt_offset[0] ** 2 + tgt_offset[1] ** 2) * tgt_skel
+    pred_off_mag = np.sqrt(pred_offset[0] ** 2 + pred_offset[1] ** 2) * pred_skel
+    off_diff = np.abs(pred_off_mag - tgt_off_mag)
+    axes[3, 4].imshow(off_diff, cmap="hot")
+    axes[3, 4].set_title("Offset Mag Diff")
+    axes[3, 4].axis("off")
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -428,11 +493,12 @@ def load_dense_model(checkpoint_path, device="cpu", config=None):
     print(f"  Model config: {model_config}")
 
     # Create model using factory
-    model = ModelFactory.create_dense_model(
-        encoder_type=model_config.get("encoder_type", "repvit"),
-        img_size=model_config.get("img_size", 64),
+    model = ModelFactory.create_unified_model(
         embed_dim=model_config.get("embed_dim", 128),
-    ).to(device)
+        num_layers=model_config.get("num_layers", 4),
+        full_heads=True,  # Dense model needs all heads
+        device=device,
+    )
 
     # Load weights
     if "model_state_dict" in checkpoint:
@@ -501,8 +567,9 @@ def main():
 
     dataloader = DataLoader(
         dataset,
-        batch_size=None,  # Dataset already returns batched data
+        batch_size=args.batch_size,
         num_workers=0,
+        collate_fn=collate_dense_batch,
     )
 
     print(f"Dataset: stage={args.stage}, img_size={dataset.img_size}")
