@@ -269,7 +269,7 @@ stages:
         log_metrics: true
 
     data:
-      curriculum_stage: 0  # 从简单开始
+      curriculum_stage: 4  # 🔥 与 start_stage 保持一致（stage 0-3 没有 Geo keypoints）
       num_workers: 14
       rust_threads: 16
 
