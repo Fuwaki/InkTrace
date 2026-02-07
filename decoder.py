@@ -185,62 +185,90 @@ class UniversalDecoder(nn.Module):
     - 实现语义对齐，而非简单的门控过滤
 
     输出头：skeleton, tangent (预训练核心), junction, width, offset (可选)
+
+    通道配置:
+    - F1 (Encoder): 32 通道 (固定)
+    - F2 (Encoder): 128 通道 (固定)
+    - F3 (Encoder): embed_dim 通道 (可配置，默认 192)
+    - Decoder 中间层: mid_channels (可配置，默认与 embed_dim 相同)
     """
 
-    def __init__(self, embed_dim=128, full_heads=True):
+    def __init__(self, embed_dim=192, mid_channels=None, full_heads=True):
         """
         Args:
-            embed_dim: Encoder 输出的 embedding 维度
+            embed_dim: Encoder F3 输出的 embedding 维度 (来自 config)
+            mid_channels: Decoder 中间层通道数 (None 时使用 embed_dim)
             full_heads: 是否输出全部 5 个头 (False 时只输出 skeleton + tangent)
         """
         super().__init__()
         self.full_heads = full_heads
+        self.embed_dim = embed_dim
 
-        # Project F3 from embed_dim to 128 if needed
+        # 中间层通道数：默认与 embed_dim 相同，保持一致性
+        if mid_channels is None:
+            mid_channels = embed_dim
+        self.mid_channels = mid_channels
+
+        # Project F3 from embed_dim to mid_channels if needed
         self.f3_proj = nn.Identity()
-        if embed_dim != 128:
-            self.f3_proj = nn.Conv2d(embed_dim, 128, 1)
+        if embed_dim != mid_channels:
+            self.f3_proj = nn.Conv2d(embed_dim, mid_channels, 1)
+
+        # Encoder skip dimensions (from encoder.py)
+        f2_channels = 128  # 固定值，与 encoder.stem2 输出一致
+        f1_channels = 32   # 固定值，与 encoder.stem1 输出一致
+
+        # Decoder 输出维度 (heads 之前)
+        # 使用渐进式降维: mid_channels -> mid_channels//2 -> 64
+        out_channels = max(64, mid_channels // 2)
 
         # ========== Layer 1: 8x8 -> 16x16 ==========
         self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
         # Grounding Block: Cross-Attention for semantic alignment
-        # dim_high=128 (Decoder), dim_low=128 (Encoder F2)
-        self.grounding1 = GroundingBlock(dim_high=128, dim_low=128, num_heads=4)
+        # dim_high=mid_channels (Decoder upsampled), dim_low=f2_channels (Encoder F2)
+        self.grounding1 = GroundingBlock(
+            dim_high=mid_channels, dim_low=f2_channels, num_heads=4
+        )
 
         # [Refactor] Explicit Fusion + Shared Processor
-        # Fusion: Merge skip connection (if any) to 128 channels
+        # Fusion: Merge skip connection (if any) to mid_channels
         self.fusion1_skip = nn.Sequential(
-            nn.Conv2d(128 + 128, 128, 1, bias=False), nn.BatchNorm2d(128)
+            nn.Conv2d(mid_channels + f2_channels, mid_channels, 1, bias=False),
+            nn.BatchNorm2d(mid_channels)
         )
-        self.fusion1_noskip = nn.Identity()  # 128 -> 128 identity
+        self.fusion1_noskip = nn.Identity()  # mid_channels -> mid_channels identity
 
         # Shared Block: NeXtBlock (7x7) to process the fused features
         # Crucial: Weights are shared between skip/noskip modes
-        self.conv1_shared = NeXtBlock(128, 128, kernel_size=7)
+        self.conv1_shared = NeXtBlock(mid_channels, mid_channels, kernel_size=7)
 
         # ========== Layer 2: 16x16 -> 32x32 ==========
         self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        # Grounding Block: dim_high=128 (Decoder), dim_low=32 (Encoder F1)
-        self.grounding2 = GroundingBlock(dim_high=128, dim_low=32, num_heads=4)
-
-        # Fusion: 128+32 -> 64
-        self.fusion2_skip = nn.Sequential(
-            nn.Conv2d(128 + 32, 64, 1, bias=False), nn.BatchNorm2d(64)
+        # Grounding Block: dim_high=mid_channels (Decoder), dim_low=f1_channels (Encoder F1)
+        self.grounding2 = GroundingBlock(
+            dim_high=mid_channels, dim_low=f1_channels, num_heads=4
         )
-        # Fusion: 128 -> 64
+
+        # Fusion: mid_channels+f1_channels -> out_channels
+        self.fusion2_skip = nn.Sequential(
+            nn.Conv2d(mid_channels + f1_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels)
+        )
+        # Fusion: mid_channels -> out_channels
         self.fusion2_noskip = nn.Sequential(
-            nn.Conv2d(128, 64, 1, bias=False), nn.BatchNorm2d(64)
+            nn.Conv2d(mid_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels)
         )
 
         # Shared Block
-        self.conv2_shared = NeXtBlock(64, 64, kernel_size=7)
+        self.conv2_shared = NeXtBlock(out_channels, out_channels, kernel_size=7)
 
         # ========== Layer 3: 32x32 -> 64x64 ==========
         self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.conv3 = NeXtBlock(64, 64, kernel_size=7)
+        self.conv3 = NeXtBlock(out_channels, out_channels, kernel_size=7)
 
         # ========== Prediction Heads ==========
-        self.heads = DenseHeads(in_channels=64, head_channels=64, full_heads=full_heads)
+        self.heads = DenseHeads(in_channels=out_channels, head_channels=64, full_heads=full_heads)
 
     def forward(self, features, use_skips=True):
         """
@@ -261,11 +289,11 @@ class UniversalDecoder(nn.Module):
             f3 = features
             f1, f2 = None, None
 
-        # Project F3 to 128 channels if needed
+        # Project F3 from embed_dim to mid_channels if needed
         f3 = self.f3_proj(f3)
 
         # ========== Block 1 (8 -> 16) ==========
-        d1_up = self.up1(f3)  # [B, 128, 16, 16]
+        d1_up = self.up1(f3)  # [B, mid_channels, 16, 16]
         if use_skips and f2 is not None:
             # Grounding: Decoder queries Encoder for relevant details
             f2_grounded = self.grounding1(d1_up, f2)

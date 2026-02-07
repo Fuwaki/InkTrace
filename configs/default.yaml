@@ -31,7 +31,7 @@ model:
   # ----------------------------------------------------------------------
   # Decoder 配置 (UniversalDecoder)
   # ----------------------------------------------------------------------
-  decoder_heads: 64       # Decoder head channels (固定值)
+  decoder_mid_channels: null  # Decoder 中间层通道数 (null=使用 embed_dim)
   decoder_kernel: 7       # NeXtBlock kernel size (固定值)
 
   # ----------------------------------------------------------------------

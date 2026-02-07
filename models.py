@@ -179,13 +179,15 @@ class UnifiedModel(nn.Module):
         super().__init__()
         self.encoder = encoder
 
-        # Infer embed_dim
+        # Infer embed_dim from encoder
         embed_dim = getattr(encoder, "token_embed", None)
         if embed_dim is not None:
             embed_dim = embed_dim.out_features
         else:
             embed_dim = 128
 
+        # Decoder 默认使用与 encoder 相同的 embed_dim
+        # 如果需要不同的中间层通道数，可以显式传入 decoder
         self.decoder = decoder or UniversalDecoder(
             embed_dim=embed_dim, full_heads=full_heads
         )
@@ -241,6 +243,7 @@ class ModelFactory:
     @staticmethod
     def create_unified_model(
         embed_dim=192,
+        decoder_mid_channels=None,
         num_heads=6,
         num_layers=4,
         full_heads=True,
@@ -252,6 +255,7 @@ class ModelFactory:
 
         Args:
             embed_dim: Encoder embedding 维度
+            decoder_mid_channels: Decoder 中间层通道数 (None 时使用 embed_dim)
             num_heads: Transformer 注意力头数
             num_layers: Transformer 层数 (与 configs/default.yaml 一致)
             full_heads: 是否输出全部 5 个头
@@ -283,7 +287,14 @@ class ModelFactory:
             encoder.load_state_dict(state_dict, strict=False)
             print("Encoder weights loaded.")
 
-        model = UnifiedModel(encoder, full_heads=full_heads).to(device)
+        # Create decoder with config-specified mid_channels
+        decoder = UniversalDecoder(
+            embed_dim=embed_dim,
+            mid_channels=decoder_mid_channels,
+            full_heads=full_heads,
+        )
+
+        model = UnifiedModel(encoder, decoder=decoder, full_heads=full_heads).to(device)
         return model
 
     @staticmethod

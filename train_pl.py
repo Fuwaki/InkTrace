@@ -509,6 +509,7 @@ def run_stage(
     model = UnifiedTask(
         stage=stage_name if stage_name != "debug" else "dense",
         embed_dim=int(model_config.get("embed_dim", 192)),
+        decoder_mid_channels=model_config.get("decoder_mid_channels"),
         num_layers=int(model_config.get("num_layers", 4)),
         lr=float(training_config.get("lr", 1e-3)),
         weight_decay=float(training_config.get("weight_decay", 1e-4)),

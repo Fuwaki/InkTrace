@@ -45,6 +45,7 @@ class UnifiedTask(pl.LightningModule):
         self,
         stage: Literal["structural", "dense"] = "dense",
         embed_dim: int = 192,  # 与 configs/default.yaml 一致
+        decoder_mid_channels: Optional[int] = None,  # Decoder 中间层通道数
         num_layers: int = 4,   # 与 configs/default.yaml 一致
         num_heads: int = 6,    # Transformer attention heads
         lr: float = 1e-3,
@@ -72,6 +73,7 @@ class UnifiedTask(pl.LightningModule):
         full_heads = stage == "dense"
         self.model = ModelFactory.create_unified_model(
             embed_dim=embed_dim,
+            decoder_mid_channels=decoder_mid_channels,
             num_heads=num_heads,
             num_layers=num_layers,
             full_heads=full_heads,
@@ -366,6 +368,7 @@ class UnifiedTask(pl.LightningModule):
         # 从 checkpoint 获取模型配置，但使用新的 stage
         model_kwargs = {
             "embed_dim": hparams.get("embed_dim", 192),  # 与 configs/default.yaml 一致
+            "decoder_mid_channels": hparams.get("decoder_mid_channels"),  # 可为 None
             "num_layers": hparams.get("num_layers", 4),   # 与 configs/default.yaml 一致
             "stage": stage,  # 使用新的 stage
         }
