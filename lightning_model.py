@@ -46,6 +46,7 @@ class UnifiedTask(pl.LightningModule):
         stage: Literal["structural", "dense"] = "dense",
         embed_dim: int = 192,  # 与 configs/default.yaml 一致
         num_layers: int = 4,   # 与 configs/default.yaml 一致
+        num_heads: int = 6,    # Transformer attention heads
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
         loss_weights: Optional[Dict[str, float]] = None,
@@ -71,6 +72,7 @@ class UnifiedTask(pl.LightningModule):
         full_heads = stage == "dense"
         self.model = ModelFactory.create_unified_model(
             embed_dim=embed_dim,
+            num_heads=num_heads,
             num_layers=num_layers,
             full_heads=full_heads,
             device="cpu",  # Lightning 会处理设备迁移

@@ -7,6 +7,7 @@ venv/
 data/
 mnist_data/
 *.pth
+*ckpt
 checkpoints/
 
 # 训练结果与日志

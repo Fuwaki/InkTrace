@@ -258,7 +258,7 @@ stages:
       # Curriculum Learning
       curriculum:
         enabled: true
-        start_stage: 0
+        start_stage: 4        # 🔥 从 stage 4 开始（stage 0-3 没有 Geo keypoints）
         end_stage: 6
         epochs_per_stage: 15 # 🔥 每阶段训练久一点
 
