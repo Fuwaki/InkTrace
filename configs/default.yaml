@@ -23,8 +23,8 @@ model:
   # ----------------------------------------------------------------------
   # Encoder 配置 (StrokeEncoder)
   # ----------------------------------------------------------------------
-  embed_dim: 192          # Transformer embedding 维度 (更宽的表达)
-  num_layers: 4           # Transformer 层数 (更快的训练)
+  embed_dim: 64          # Transformer embedding 维度
+  num_layers: 6           # Transformer 层数 (更快的训练)
   num_heads: 6            # Attention 头数 (192/6=32, 标准head_dim)
   dropout: 0.1            # Dropout 率
 

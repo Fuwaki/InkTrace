@@ -9,62 +9,26 @@ from RepVit import Conv2d_BN
 # =============================================================================
 
 
-class SkeletonMSCA(nn.Module):
-    """
-    Multi-Scale Context Aggregation for Skeleton Structures
+class LargeKernelBlock(nn.Module):
+    """单层大核卷积，类似 ConvNeXt 风格的轻量大感受野块"""
 
-    使用 Strip Conv (条形卷积) 捕捉长距离笔画结构
-    相比 ASPP 的优势：针对长条形结构更高效
-    """
-
-    def __init__(self, dim):
+    def __init__(self, dim, kernel_size=11):
         super().__init__()
-
-        # 1. Local feature (5x5)
-        self.conv_local = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
-
-        # 2. Medium-range strip conv (11px) - 捕捉中等长度笔画片段
-        self.conv_med_h = nn.Conv2d(dim, dim, (1, 11), padding=(0, 5), groups=dim)
-        self.conv_med_v = nn.Conv2d(dim, dim, (11, 1), padding=(5, 0), groups=dim)
-
-        # 3. Long-range strip conv (21px) - 捕捉长笔画和全局结构
-        self.conv_long_h = nn.Conv2d(dim, dim, (1, 21), padding=(0, 10), groups=dim)
-        self.conv_long_v = nn.Conv2d(dim, dim, (21, 1), padding=(10, 0), groups=dim)
-
-        # 4. Feature fusion with gating
-        self.fusion = nn.Sequential(
-            nn.Conv2d(dim, dim, 1, bias=False),
-            nn.BatchNorm2d(dim),
-            nn.Sigmoid(),  # Gating mechanism
+        self.dwconv = nn.Conv2d(
+            dim, dim, kernel_size, padding=kernel_size // 2, groups=dim
+        )
+        self.norm = nn.BatchNorm2d(dim)
+        self.pwconv = nn.Sequential(
+            nn.Conv2d(dim, dim * 2, 1),
+            nn.GELU(),
+            nn.Conv2d(dim * 2, dim, 1),
         )
 
-        # 5. Residual projection
-        self.res_proj = nn.Conv2d(dim, dim, 1, bias=False)
-
     def forward(self, x):
-        """
-        Args:
-            x: [B, C, H, W]
-        Returns:
-            Enhanced features with long-range context
-        """
-        identity = x
-
-        # Local feature
-        attn = self.conv_local(x)
-
-        # Multi-scale strip convolutions
-        attn_med = self.conv_med_v(self.conv_med_h(attn))
-        attn_long = self.conv_long_v(self.conv_long_h(attn))
-
-        # Aggregate multi-scale features
-        attn = attn + attn_med + attn_long
-
-        # Gating (soft attention)
-        gate = self.fusion(attn)
-
-        # Output with residual connection
-        return identity * gate + self.res_proj(attn)
+        out = self.dwconv(x)
+        out = self.norm(out)
+        out = self.pwconv(out)
+        return x + out
 
 
 class DenseHeads(nn.Module):
@@ -81,10 +45,10 @@ class DenseHeads(nn.Module):
             - False: 端到端优化，但可能梯度冲突
     """
 
-    def __init__(self, in_channels, head_channels=64, full_heads=True, detach_skel=True):
+    def __init__(self, in_channels, head_channels=64, detach_guidance=True):
         super().__init__()
-        self.full_heads = full_heads
-        self.detach_skel = detach_skel
+        # 始终启用所有 heads（移除 full_heads 参数）
+        self.detach_guidance = detach_guidance
 
         # ==========================================
         # Shared Stem
@@ -96,47 +60,67 @@ class DenseHeads(nn.Module):
         # ==========================================
         # Stage 1: Pixel-Level Tasks (Parallel)
         # ==========================================
-        # 1. Skeleton Map (1ch, Sigmoid)
-        self.skeleton = nn.Sequential(nn.Conv2d(head_channels, 1, 1), nn.Sigmoid())
+        # Per-head refinement layers (gradient buffering + non-linear transform)
+        self.skel_refine = nn.Sequential(
+            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
+            nn.GELU(),
+        )
+        self.tan_refine = nn.Sequential(
+            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
+            nn.GELU(),
+        )
 
-        # 2. Tangent Field (2ch, Tanh) - cos2θ, sin2θ
-        self.tangent = nn.Sequential(nn.Conv2d(head_channels, 2, 1), nn.Tanh())
+        # 1. Skeleton Map: keep a sigmoid wrapper for compatibility,
+        # but expose raw logits via `self.skel_conv` for later use
+        self.skel_conv = nn.Conv2d(head_channels, 1, 1)
+        self.skeleton = nn.Sequential(self.skel_conv, nn.Sigmoid())
 
-        if self.full_heads:
-            # 3. Width Map (1ch, Softplus)
-            self.width = nn.Sequential(nn.Conv2d(head_channels, 1, 1), nn.Softplus())
+        # 2. Tangent Field (2ch) - will be normalized to unit vectors (unit circle)
+        # 输出为未归一化的 2 通道向量，前向中会归一化到单位圆
+        self.tangent = nn.Conv2d(head_channels, 2, 1)
 
-            # 4. Offset Map (2ch, scaled Tanh)
-            self.offset_conv = nn.Conv2d(head_channels, 2, 1)
+        # 3. Width Map (1ch, Softplus)
+        self.width_refine = nn.Sequential(
+            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
+            nn.GELU(),
+        )
+        self.width = nn.Sequential(nn.Conv2d(head_channels, 1, 1), nn.Softplus())
 
-            # ==========================================
-            # Stage 2: Topological Task (Cascaded)
-            # ==========================================
-            # Keypoints 需要知道：
-            # - 骨架位置 (哪里有关键点)
-            # - 切线方向 (什么类型的关键点：端点/交叉/拐点)
-            # - 绝对坐标 (空间位置)
+        # 4. Offset Map (2ch, scaled Tanh)
+        self.offset_refine = nn.Sequential(
+            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
+            nn.GELU(),
+        )
+        self.offset_conv = nn.Conv2d(head_channels, 2, 1)
 
-            # Fusion: Stem(64) + Skeleton(1) + Tangent(2) + Coords(2) = 69 → 64
-            self.keypoint_fusion = nn.Sequential(
-                nn.Conv2d(head_channels + 1 + 2 + 2, head_channels, 1, bias=False),
-                nn.BatchNorm2d(head_channels),
-                nn.ReLU(inplace=True),
-            )
+        # ==========================================
+        # Stage 2: Topological Task (Cascaded)
+        # ==========================================
+        # Keypoints 需要知道：
+        # - 骨架位置 (哪里有关键点)
+        # - 切线方向 (什么类型的关键点：端点/交叉/拐点)
+        # - 绝对坐标 (空间位置)
 
-            # MSCA for long-range dependency
-            self.geo_msca = SkeletonMSCA(dim=head_channels)
+        # Fusion: Stem(64) + Skeleton(1) + Tangent(2) + Coords(2) = 69 → 64
+        self.keypoint_fusion = nn.Sequential(
+            nn.Conv2d(head_channels + 1 + 2 + 2, head_channels, 1, bias=False),
+            nn.BatchNorm2d(head_channels),
+            nn.ReLU(inplace=True),
+        )
 
-            # 5. Keypoints Map (2ch, Sigmoid)
-            #    Ch0: Topological nodes (endpoints, junctions) - MUST break
-            #    Ch1: Geometric anchors (sharp turns, inflections) - SHOULD break
-            self.keypoints = nn.Sequential(
-                nn.Conv2d(head_channels, head_channels // 2, 3, padding=1, bias=False),
-                nn.BatchNorm2d(head_channels // 2),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(head_channels // 2, 2, 1),
-                nn.Sigmoid(),
-            )
+        # Large-kernel block for long-range dependency
+        self.geo_msca = LargeKernelBlock(dim=head_channels, kernel_size=11)
+
+        # 5. Keypoints Map (2ch, Sigmoid)
+        #    Ch0: Topological nodes (endpoints, junctions) - MUST break
+        #    Ch1: Geometric anchors (sharp turns, inflections) - SHOULD break
+        # Keypoint head produces logits; sigmoid applied in forward
+        self.keypoints = nn.Sequential(
+            nn.Conv2d(head_channels, head_channels // 2, 3, padding=1, bias=False),
+            nn.BatchNorm2d(head_channels // 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(head_channels // 2, 2, 1),
+        )
 
         self._init_weights()
 
@@ -149,62 +133,65 @@ class DenseHeads(nn.Module):
         """
         B, _, H, W = x.shape
 
-        # ==========================================
-        # Stage 1: Parallel Predictions
-        # ==========================================
         feat_stem = self.shared_conv(x)
 
-        skel_pred = self.skeleton(feat_stem)
-        tan_pred = self.tangent(feat_stem)
+        # 使用 per-head refinement 层
+        skel_feat = self.skel_refine(feat_stem)
+        skel_logits = self.skel_conv(skel_feat)
+        skel_pred = torch.sigmoid(skel_logits)
+
+        # 原始切线向量，随后归一化到单位圆以确保长度为 1
+        tan_feat = self.tan_refine(feat_stem)
+        tan_raw = self.tangent(tan_feat)
+        # 强制投影到单位圆
+        tan_pred = F.normalize(tan_raw, dim=1, eps=1e-6)
 
         outputs = {
             "skeleton": skel_pred,
             "tangent": tan_pred,
         }
 
-        if self.full_heads:
-            # Pixel tasks (parallel)
-            out_width = self.width(feat_stem)
-            out_offset = torch.tanh(self.offset_conv(feat_stem)) * 0.5
+        # Pixel tasks (parallel)
+        width_feat = self.width_refine(feat_stem)
+        out_width = self.width(width_feat)
 
-            # ==========================================
-            # Stage 2: Cascaded Keypoints
-            # ==========================================
-            # 生成坐标网格 [-1, 1]
-            y_grid = (
-                torch.linspace(-1, 1, H, device=x.device)
-                .view(1, 1, H, 1)
-                .expand(B, 1, H, W)
-            )
-            x_grid = (
-                torch.linspace(-1, 1, W, device=x.device)
-                .view(1, 1, 1, W)
-                .expand(B, 1, H, W)
-            )
+        offset_feat = self.offset_refine(feat_stem)
+        out_offset = torch.tanh(self.offset_conv(offset_feat)) * 0.5
 
-            # 准备 Skeleton 引导（可选 detach）
-            # Tangent 不需要 detach，因为它的几何信息对 keypoints 很重要
-            skel_guide = skel_pred.detach() if self.detach_skel else skel_pred
+        # 生成坐标网格 [-1, 1]
+        y_grid = (
+            torch.linspace(-1, 1, H, device=x.device)
+            .view(1, 1, H, 1)
+            .expand(B, 1, H, W)
+        )
+        x_grid = (
+            torch.linspace(-1, 1, W, device=x.device)
+            .view(1, 1, 1, W)
+            .expand(B, 1, H, W)
+        )
 
-            # 拼接：原始特征 + 骨架引导 + 切线方向 + 位置编码
-            fusion_input = torch.cat(
-                [feat_stem, skel_guide, tan_pred, x_grid, y_grid], dim=1
-            )  # [B, 64+1+2+2, H, W] = [B, 69, H, W]
+        # 准备 skeleton/tangent 引导（可选 detach）
+        if self.detach_guidance:
+            skel_guide = skel_logits.detach()
+            tan_guide = tan_raw.detach()
+        else:
+            skel_guide = skel_logits
+            tan_guide = tan_raw
 
-            # 特征融合 + 多尺度上下文聚合
-            feat_key = self.keypoint_fusion(fusion_input)
-            feat_key = self.geo_msca(feat_key)
+        # 拼接：原始特征 + 骨架引导(logits) + 切线原始向量 + 位置编码
+        fusion_input = torch.cat(
+            [feat_stem, skel_guide, tan_guide, x_grid, y_grid], dim=1
+        )
 
-            # Keypoints 预测
-            out_keys = self.keypoints(feat_key)
+        # 特征融合 + 多尺度上下文聚合
+        feat_key = self.keypoint_fusion(fusion_input)
+        feat_key = self.geo_msca(feat_key)
 
-            outputs.update(
-                {
-                    "width": out_width,
-                    "offset": out_offset,
-                    "keypoints": out_keys,  # [B, 2, H, W]
-                }
-            )
+        # Keypoints 预测 (logits -> sigmoid)
+        kp_logits = self.keypoints(feat_key)
+        kp_pred = torch.sigmoid(kp_logits)
+
+        outputs.update({"width": out_width, "offset": out_offset, "keypoints": kp_pred})
 
         return outputs
 
@@ -215,13 +202,12 @@ class DenseHeads(nn.Module):
         将最后一层 bias 初始化为 -4.59 (ln(0.01/0.99))。
         不仅加速收敛，还能防止 loss 在训练初期爆炸。
         """
-        # Skeleton: Sparse foreground
-        if isinstance(self.skeleton[0], nn.Conv2d):
-            nn.init.constant_(self.skeleton[0].bias, -4.59)
+        # Skeleton: Sparse foreground (initialize logits bias)
+        if hasattr(self, "skel_conv") and isinstance(self.skel_conv, nn.Conv2d):
+            if self.skel_conv.bias is not None:
+                nn.init.constant_(self.skel_conv.bias, -4.59)
 
-        # Keypoints: Extremely sparse (Conv2d before Sigmoid)
-        # BUG FIX: keypoints[-1] 是 Sigmoid (无 bias)，需要用 [-2] 获取最后的 Conv2d
-        if self.full_heads:
-            last_conv = self.keypoints[-2]  # Sigmoid 前的 Conv2d
-            if isinstance(last_conv, nn.Conv2d):
-                nn.init.constant_(last_conv.bias, -4.59)
+        # Keypoints: Extremely sparse (last conv outputs logits)
+        last_conv = self.keypoints[-1]
+        if isinstance(last_conv, nn.Conv2d) and last_conv.bias is not None:
+            nn.init.constant_(last_conv.bias, -4.59)

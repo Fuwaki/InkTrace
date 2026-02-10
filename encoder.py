@@ -6,34 +6,72 @@ from RepVit import RepViTBlock, Conv2d_BN, _make_divisible
 
 class AddCoords(nn.Module):
     """
-    自动添加坐标通道
-    输入: [B, 1, H, W]
-    输出: [B, 3, H, W] (Gray + X_coord + Y_coord)
+    自动添加坐标通道，支持高频（Fourier）坐标注入
+    输入: [B, C, H, W]
+    输出: [B, C + added_channels, H, W]
     """
 
-    def __init__(self, with_r=False):
+    def __init__(self, num_freqs=2, height=64, width=64):
         super().__init__()
-        self.with_r = with_r  # 是否添加半径 r (可选)
+        self.num_freqs = num_freqs
+        self.height = height
+        self.width = width
+        self.added_channels = 2 + (self.num_freqs * 4)
+
+        # 执行预计算
+        self._precompute_coords()
+
+    def _precompute_coords(self):
+        # 1. 使用 meshgrid 生成完整的 HxW 网格 (更直观，且自动处理广播)
+        # indexing='ij' 保证 y 在前 (H), x 在后 (W)
+        yy = torch.linspace(-1, 1, self.height)
+        xx = torch.linspace(-1, 1, self.width)
+        grid_y, grid_x = torch.meshgrid(yy, xx, indexing="ij")
+
+        # grid_y, grid_x 形状均为 [H, W]
+        # 扩展维度以便拼接: [H, W] -> [1, H, W]
+        grid_x = grid_x.unsqueeze(0)
+        grid_y = grid_y.unsqueeze(0)
+
+        # 2. 收集所有坐标特征
+        coords_list = [grid_x, grid_y]  # 基础线性坐标
+
+        # 3. 生成 Fourier 特征 (所有特征都必须是 [1, H, W] 形状)
+        for i in range(self.num_freqs):
+            freq = (2.0**i) * math.pi
+            coords_list.extend(
+                [
+                    torch.sin(freq * grid_x),
+                    torch.cos(freq * grid_x),
+                    torch.sin(freq * grid_y),
+                    torch.cos(freq * grid_y),
+                ]
+            )
+
+        # 4. 拼接所有特征通道
+        # 结果形状: [added_channels, H, W]
+        full_coords = torch.cat(coords_list, dim=0)
+
+        # 5. 增加 Batch 维度并注册为 Buffer
+        # 最终形状: [1, added_channels, H, W]
+        self.register_buffer("cached_coords", full_coords.unsqueeze(0))
 
     def forward(self, x):
         B, _, H, W = x.shape
 
-        # 生成 -1 到 1 的线性网格
-        # align_corners=True 保证 -1 在最左/上，1 在最右/下
-        y_coords = (
-            torch.linspace(-1, 1, H, device=x.device)
-            .view(1, 1, H, 1)
-            .expand(B, 1, H, W)
-        )
-        x_coords = (
-            torch.linspace(-1, 1, W, device=x.device)
-            .view(1, 1, 1, W)
-            .expand(B, 1, H, W)
-        )
+        # 简单的尺寸检查
+        if H != self.height or W != self.width:
+            # 如果尺寸变了（动态输入），这里需要重新计算或者报错
+            # 为保证鲁棒性，建议报错，或者在这里动态生成（会慢一点）
+            raise ValueError(
+                f"Input size ({H}, {W}) doesn't match precomputed size ({self.height}, {self.width})"
+            )
 
-        # 拼接到输入图像后面
-        ret = torch.cat([x, x_coords, y_coords], dim=1)
-        return ret
+        # 直接 Expand 并拼接，效率最高
+        # cached_coords: [1, C_add, H, W] -> [B, C_add, H, W]
+        coords = self.cached_coords.expand(B, -1, -1, -1)
+
+        return torch.cat([x, coords], dim=1)
 
 
 class StrokeEncoder(nn.Module):
@@ -41,20 +79,20 @@ class StrokeEncoder(nn.Module):
 
     def __init__(
         self,
-        in_channels=1,      # 单通道灰度图
-        embed_dim=192,      # embedding 维度 (与 configs/default.yaml 一致)
-        num_heads=6,        # Transformer 注意力头数
-        num_layers=4,       # Transformer 层数 (与 configs/default.yaml 一致)
+        in_channels=1,  # 单通道灰度图
+        embed_dim=192,  # embedding 维度 (与 configs/default.yaml 一致)
+        num_heads=6,  # Transformer 注意力头数
+        num_layers=4,  # Transformer 层数 (与 configs/default.yaml 一致)
         dropout=0.1,
     ):
         super().__init__()
 
         # --- 修改点 1: 引入坐标生成器 ---
-        self.add_coords = AddCoords()
+        self.add_coords = AddCoords(height=64, width=64)  # 预计算 64x64 坐标
 
-        # --- 修改点 2: Stem 接收 3 通道 (1 Gray + 1 X + 1 Y) ---
+        # --- 修改点 2: Stem 接收动态通道数 (1 Gray + added_coords) ---
         # 这样网络第一层就能感知绝对几何位置
-        input_channels_with_coords = in_channels + 2
+        input_channels_with_coords = in_channels + self.add_coords.added_channels
 
         self.stem1 = nn.Sequential(
             Conv2d_BN(input_channels_with_coords, 32, 3, 2, 1),  # 3 -> 32
@@ -96,19 +134,15 @@ class StrokeEncoder(nn.Module):
         self.feature_dim = input_channel  # 128
         self.spatial_size = 8  # 8x8 特征图 = 64 tokens
 
-        # 3. 特征图 -> Token 序列
+        # 4. 特征图 -> Token 序列
         # 将 128x8x8 展平为 64x128 的 token 序列
         self.token_embed = nn.Linear(self.feature_dim, embed_dim)
 
-        # 4. 位置编码
-        # --- 修改点 3: 这里的 pos_embed 怎么处理？ ---
-        # 既然我们在 Stem 里已经加了 CoordConv，这里的 pos_embed 其实成了“第二道保险”。
-        # 建议保留，但初始化方式可以更科学一点（截断正态分布）
-        self.num_tokens = self.spatial_size * self.spatial_size
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
+        # 5. 可学习位置编码
+        self.pos_embed = nn.Parameter(torch.zeros(1, 64, embed_dim))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-        # 5. Transformer Encoder (增加层数以充分利用 token)
+        # 6. Transformer Encoder (增加层数以充分利用 token)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
@@ -119,7 +153,7 @@ class StrokeEncoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # 6. Layer Normalization
+        # 7. Layer Normalization
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x, return_interm_layers=False):
@@ -162,8 +196,8 @@ class StrokeEncoder(nn.Module):
         # 4. Embedding 投影
         x = self.token_embed(x)  # [B, 64, embed_dim]
 
-        # 5. 添加位置编码
-        x = x + self.pos_embed  # [B, 64, embed_dim]
+        # 5. 可学习位置编码
+        x = x + self.pos_embed
 
         # 6. Transformer 处理
         x_trans = self.transformer(x)  # [B, 64, embed_dim]
@@ -175,7 +209,7 @@ class StrokeEncoder(nn.Module):
             # Reshape embeddings back to spatial [B, C, H, W] for F3
             # embeddings: [B, 64, embed_dim] -> [B, embed_dim, 8, 8]
             # But decoder expects 128 channels, so we need a projection
-            H = W = int(self.num_tokens**0.5)
+            H = W = self.spatial_size  # 8
             # Project back to feature_dim (128) if embed_dim != 128
             f3_enhanced = embeddings.transpose(1, 2).reshape(
                 B, -1, H, W
