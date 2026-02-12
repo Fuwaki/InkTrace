@@ -33,132 +33,86 @@ class LargeKernelBlock(nn.Module):
 
 class DenseHeads(nn.Module):
     """
-    Hybrid Dense Prediction Heads
+    混合密集预测头（坐标注入共享主干版）
 
-    架构设计：
-    - Stage 1 (Parallel): Skeleton, Tangent, Width, Offset - 同时输出
-    - Stage 2 (Cascaded): Keypoints - 利用 Skeleton 作为 attention 引导
+    设计特点：
+    - 坐标网格在进入共享主干前即拼接，所有任务共享位置先验
+    - 强共享特征 + 骨架独立微增强 + 其他头直接投影
+    - 关键点头利用共享特征及骨架/切线引导，但不再重复注入坐标
 
     参数：
-        detach_skel: 是否断开 Skeleton 的梯度
-            - True: 训练稳定，但 Keypoints 无法修正 Skeleton
-            - False: 端到端优化，但可能梯度冲突
+        in_channels : 解码器输入特征通道数
+        head_channels: 共享特征通道数（默认64）
+        detach_guidance: 是否断开骨架/切线到关键点的梯度（默认False，端到端）
     """
 
-    def __init__(self, in_channels, head_channels=64, detach_guidance=True):
+    def __init__(self, in_channels, head_channels=64, detach_guidance=False):
         super().__init__()
-        # 始终启用所有 heads（移除 full_heads 参数）
         self.detach_guidance = detach_guidance
 
         # ==========================================
-        # Shared Stem
+        # Shared Stem with Early Coordinate Injection
         # ==========================================
-        self.shared_conv = nn.Sequential(
-            Conv2d_BN(in_channels, head_channels, 3, 1, 1), nn.GELU()
+        # 输入特征 + 2通道坐标网格 -> 调整通道 -> 强特征提取
+        self.coord_conv = nn.Sequential(
+            Conv2d_BN(in_channels + 2, head_channels, 3, 1, 1),  # 含 BN
+            nn.GELU(),
+        )
+        self.shared_blocks = nn.Sequential(
+            LargeKernelBlock(head_channels, kernel_size=5),
+            LargeKernelBlock(head_channels, kernel_size=5),
         )
 
         # ==========================================
         # Stage 1: Pixel-Level Tasks (Parallel)
         # ==========================================
-        # Per-head refinement layers (gradient buffering + non-linear transform)
-        self.skel_refine = nn.Sequential(
-            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
-            nn.GELU(),
-        )
-        self.tan_refine = nn.Sequential(
-            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
-            nn.GELU(),
-        )
+        # ----- 1. Skeleton Head (Enhanced) -----
+        self.skel_enhance = LargeKernelBlock(head_channels, kernel_size=5)
+        self.skel_conv = nn.Conv2d(head_channels, 1, 1)  # logits
 
-        # 1. Skeleton Map: keep a sigmoid wrapper for compatibility,
-        # but expose raw logits via `self.skel_conv` for later use
-        self.skel_conv = nn.Conv2d(head_channels, 1, 1)
-        self.skeleton = nn.Sequential(self.skel_conv, nn.Sigmoid())
+        # ----- 2. Tangent Head (Direct Projection) -----
+        self.tangent = nn.Conv2d(head_channels, 2, 1)  # raw vectors
 
-        # 2. Tangent Field (2ch) - will be normalized to unit vectors (unit circle)
-        # 输出为未归一化的 2 通道向量，前向中会归一化到单位圆
-        self.tangent = nn.Conv2d(head_channels, 2, 1)
+        # ----- 3. Width Head (Direct Projection) -----
+        self.width_conv = nn.Conv2d(head_channels, 1, 1)
+        self.width_act = nn.Softplus()
 
-        # 3. Width Map (1ch, Softplus)
-        self.width_refine = nn.Sequential(
-            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
-            nn.GELU(),
-        )
-        self.width = nn.Sequential(nn.Conv2d(head_channels, 1, 1), nn.Softplus())
-
-        # 4. Offset Map (2ch, scaled Tanh)
-        self.offset_refine = nn.Sequential(
-            Conv2d_BN(head_channels, head_channels, 3, 1, 1),
-            nn.GELU(),
-        )
+        # ----- 4. Offset Head (Direct Projection) -----
         self.offset_conv = nn.Conv2d(head_channels, 2, 1)
+        self.offset_scale = 0.5
 
         # ==========================================
-        # Stage 2: Topological Task (Cascaded)
+        # Stage 2: Topological Task (Cascaded Keypoints)
         # ==========================================
-        # Keypoints 需要知道：
-        # - 骨架位置 (哪里有关键点)
-        # - 切线方向 (什么类型的关键点：端点/交叉/拐点)
-        # - 绝对坐标 (空间位置)
-
-        # Fusion: Stem(64) + Skeleton(1) + Tangent(2) + Coords(2) = 69 → 64
+        # 融合特征：共享特征 + 骨架logits + 切线原始向量 (不再包含坐标网格)
+        fusion_channels = head_channels + 1 + 2
         self.keypoint_fusion = nn.Sequential(
-            nn.Conv2d(head_channels + 1 + 2 + 2, head_channels, 1, bias=False),
+            nn.Conv2d(fusion_channels, head_channels, 1, bias=False),
             nn.BatchNorm2d(head_channels),
             nn.ReLU(inplace=True),
         )
 
-        # Large-kernel block for long-range dependency
-        self.geo_msca = LargeKernelBlock(dim=head_channels, kernel_size=11)
-
-        # 5. Keypoints Map (2ch, Sigmoid)
-        #    Ch0: Topological nodes (endpoints, junctions) - MUST break
-        #    Ch1: Geometric anchors (sharp turns, inflections) - SHOULD break
-        # Keypoint head produces logits; sigmoid applied in forward
-        self.keypoints = nn.Sequential(
-            nn.Conv2d(head_channels, head_channels // 2, 3, padding=1, bias=False),
-            nn.BatchNorm2d(head_channels // 2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(head_channels // 2, 2, 1),
+        # 关键点特征增强：2×LKB(5) 替代原单一大核11x11，更精细
+        self.kp_enhance = nn.Sequential(
+            LargeKernelBlock(head_channels, kernel_size=5),
+            LargeKernelBlock(head_channels, kernel_size=5),
         )
+
+        # 关键点输出：直接1×1卷积到2通道logits
+        self.keypoints = nn.Conv2d(head_channels, 2, 1)
 
         self._init_weights()
 
     def forward(self, x):
         """
         Args:
-            x: [B, 64, 64, 64] Feature map from Decoder
+            x: [B, C, H, W] 来自解码器的特征图（例如 64×64）
         Returns:
-            dict with skeleton, tangent, width, offset, keypoints
+            dict: skeleton, tangent, width, offset, keypoints
         """
         B, _, H, W = x.shape
 
-        feat_stem = self.shared_conv(x)
-
-        # 使用 per-head refinement 层
-        skel_feat = self.skel_refine(feat_stem)
-        skel_logits = self.skel_conv(skel_feat)
-        skel_pred = torch.sigmoid(skel_logits)
-
-        # 原始切线向量，随后归一化到单位圆以确保长度为 1
-        tan_feat = self.tan_refine(feat_stem)
-        tan_raw = self.tangent(tan_feat)
-        # 强制投影到单位圆
-        tan_pred = F.normalize(tan_raw, dim=1, eps=1e-6)
-
-        outputs = {
-            "skeleton": skel_pred,
-            "tangent": tan_pred,
-        }
-
-        # Pixel tasks (parallel)
-        width_feat = self.width_refine(feat_stem)
-        out_width = self.width(width_feat)
-
-        offset_feat = self.offset_refine(feat_stem)
-        out_offset = torch.tanh(self.offset_conv(offset_feat)) * 0.5
-
-        # 生成坐标网格 [-1, 1]
+        # ----- 生成坐标网格（[-1, 1] 归一化）-----
         y_grid = (
             torch.linspace(-1, 1, H, device=x.device)
             .view(1, 1, H, 1)
@@ -169,8 +123,31 @@ class DenseHeads(nn.Module):
             .view(1, 1, 1, W)
             .expand(B, 1, H, W)
         )
+        coord = torch.cat([x_grid, y_grid], dim=1)  # [B, 2, H, W]
 
-        # 准备 skeleton/tangent 引导（可选 detach）
+        # ----- 坐标注入 + 共享特征提取 -----
+        x_with_coord = torch.cat([x, coord], dim=1)  # [B, C+2, H, W]
+        feat_stem = self.coord_conv(x_with_coord)  # [B, head_channels, H, W]
+        feat_stem = self.shared_blocks(feat_stem)  # 2×LKB
+
+        # ----- 骨架预测（增强）-----
+        skel_feat = self.skel_enhance(feat_stem)  # 1×LKB
+        skel_logits = self.skel_conv(skel_feat)  # [B, 1, H, W]
+        skel_pred = torch.sigmoid(skel_logits)
+
+        # ----- 切线预测（直接投影 + 单位圆归一化）-----
+        tan_raw = self.tangent(feat_stem)  # [B, 2, H, W]
+        tan_pred = F.normalize(tan_raw, dim=1, eps=1e-6)
+
+        # ----- 宽度预测（直接投影 + Softplus）-----
+        width_logits = self.width_conv(feat_stem)
+        width_pred = self.width_act(width_logits)
+
+        # ----- 偏移预测（直接投影 + Tanh缩放）-----
+        offset_raw = self.offset_conv(feat_stem)
+        offset_pred = torch.tanh(offset_raw) * self.offset_scale
+
+        # ----- 引导特征（梯度控制）-----
         if self.detach_guidance:
             skel_guide = skel_logits.detach()
             tan_guide = tan_raw.detach()
@@ -178,36 +155,26 @@ class DenseHeads(nn.Module):
             skel_guide = skel_logits
             tan_guide = tan_raw
 
-        # 拼接：原始特征 + 骨架引导(logits) + 切线原始向量 + 位置编码
-        fusion_input = torch.cat(
-            [feat_stem, skel_guide, tan_guide, x_grid, y_grid], dim=1
-        )
-
-        # 特征融合 + 多尺度上下文聚合
-        feat_key = self.keypoint_fusion(fusion_input)
-        feat_key = self.geo_msca(feat_key)
-
-        # Keypoints 预测 (logits -> sigmoid)
-        kp_logits = self.keypoints(feat_key)
+        # ----- 关键点融合与预测（不再拼接坐标）-----
+        fusion_input = torch.cat([feat_stem, skel_guide, tan_guide], dim=1)
+        feat_fuse = self.keypoint_fusion(fusion_input)
+        feat_fuse = self.kp_enhance(feat_fuse)  # 2×LKB
+        kp_logits = self.keypoints(feat_fuse)  # [B, 2, H, W]
         kp_pred = torch.sigmoid(kp_logits)
 
-        outputs.update({"width": out_width, "offset": out_offset, "keypoints": kp_pred})
-
-        return outputs
+        return {
+            "skeleton": skel_pred,
+            "tangent": tan_pred,
+            "width": width_pred,
+            "offset": offset_pred,
+            "keypoints": kp_pred,
+        }
 
     def _init_weights(self):
-        """
-        Tip A: Sigmoid Bias Initialization
-        对于极度稀疏的任务（Skeleton, Keypoints 只有 <5% 前景），
-        将最后一层 bias 初始化为 -4.59 (ln(0.01/0.99))。
-        不仅加速收敛，还能防止 loss 在训练初期爆炸。
-        """
-        # Skeleton: Sparse foreground (initialize logits bias)
+        """稀疏任务偏置初始化 (logits bias = -4.59)"""
         if hasattr(self, "skel_conv") and isinstance(self.skel_conv, nn.Conv2d):
             if self.skel_conv.bias is not None:
                 nn.init.constant_(self.skel_conv.bias, -4.59)
-
-        # Keypoints: Extremely sparse (last conv outputs logits)
-        last_conv = self.keypoints[-1]
-        if isinstance(last_conv, nn.Conv2d) and last_conv.bias is not None:
-            nn.init.constant_(last_conv.bias, -4.59)
+        if hasattr(self, "keypoints") and isinstance(self.keypoints, nn.Conv2d):
+            if self.keypoints.bias is not None:
+                nn.init.constant_(self.keypoints.bias, -4.59)
