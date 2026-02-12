@@ -1,7 +1,7 @@
 from torch import nn
 import torch
-from RepVit import Conv2d_BN
 import math
+from timm.models.repvit import ConvNorm
 class AddCoords(nn.Module):
     """
     自动添加坐标通道，支持高频（Fourier）坐标注入
@@ -167,7 +167,7 @@ class NeXtBlock(nn.Module):
         # Ensure input fits output dimension if needed for residual connection
         self.shortcut = nn.Identity()
         if in_channels != out_channels:
-            self.shortcut = Conv2d_BN(in_channels, out_channels, 1, 1, 0)
+            self.shortcut = ConvNorm(in_channels, out_channels, 1, 1, 0)
 
         # 1. Depthwise Conv: Large Kernel (7x7), Spatial mixing
         # We assume input has been projected to 'out_channels' dimension or we handle it inside.
@@ -179,11 +179,11 @@ class NeXtBlock(nn.Module):
         self.pre_proj = nn.Identity()
         current_dim = in_channels
         if in_channels != out_channels:
-            self.pre_proj = Conv2d_BN(in_channels, out_channels, 1, 1, 0)
+            self.pre_proj = ConvNorm(in_channels, out_channels, 1, 1, 0)
             current_dim = out_channels
 
         # Now standard ConvNeXt block
-        self.dwconv = Conv2d_BN(
+        self.dwconv = ConvNorm(
             current_dim,
             current_dim,
             kernel_size,
@@ -193,9 +193,9 @@ class NeXtBlock(nn.Module):
         )
 
         hidden_dim = int(current_dim * expand_ratio)
-        self.pwconv1 = Conv2d_BN(current_dim, hidden_dim, 1, 1, 0)
+        self.pwconv1 = ConvNorm(current_dim, hidden_dim, 1, 1, 0)
         self.act = nn.GELU()
-        self.pwconv2 = Conv2d_BN(hidden_dim, current_dim, 1, 1, 0)
+        self.pwconv2 = ConvNorm(hidden_dim, current_dim, 1, 1, 0)
 
     def forward(self, x):
         # Shortcut uses original input

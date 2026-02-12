@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from RepVit import Conv2d_BN
-from modules import LargeKernelBlock,AddCoords
+from modules import LargeKernelBlock, AddCoords
 
 class DenseHeads(nn.Module):
     """
@@ -22,14 +21,16 @@ class DenseHeads(nn.Module):
     def __init__(self, in_channels, head_channels=64, detach_guidance=False):
         super().__init__()
         self.detach_guidance = detach_guidance
-        self.add_coords = AddCoords(height=64, width=64)
+        self.add_coords = AddCoords(height=64, width=64, num_freqs=1)  # num_freqs=1 adds 6 channels
 
         # ==========================================
         # Shared Stem with Early Coordinate Injection
         # ==========================================
-        # 输入特征 + 2通道坐标网格 -> 调整通道 -> 强特征提取
+        # 输入特征 + 6通道坐标网格 (num_freqs=1) -> 调整通道 -> 强特征提取
+        coord_in_channels = in_channels + self.add_coords.added_channels
         self.coord_conv = nn.Sequential(
-            Conv2d_BN(in_channels + 6, head_channels, 3, 1, 1),  # 含 BN
+            nn.Conv2d(coord_in_channels, head_channels, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(head_channels),
             nn.GELU(),
         )
         self.shared_blocks = nn.Sequential(
@@ -58,8 +59,9 @@ class DenseHeads(nn.Module):
         # ==========================================
         # Stage 2: Topological Task (Cascaded Keypoints)
         # ==========================================
-        # 融合特征：共享特征 + 骨架logits + 切线原始向量 (不再包含坐标网格)
-        fusion_channels = head_channels + 1 + 2
+        # 融合特征：共享特征 + 原始输入 x（保留详细信息）
+        # 不使用 skel_guide/tan_guide（因为只是简单线性投影，信息量有限）
+        fusion_channels = head_channels + in_channels
         self.keypoint_fusion = nn.Sequential(
             nn.Conv2d(fusion_channels, head_channels, 1, bias=False),
             nn.BatchNorm2d(head_channels),
@@ -107,16 +109,9 @@ class DenseHeads(nn.Module):
         offset_raw = self.offset_conv(feat_stem)
         offset_pred = torch.tanh(offset_raw) * self.offset_scale
 
-        # ----- 引导特征（梯度控制）-----
-        if self.detach_guidance:
-            skel_guide = skel_logits.detach()
-            tan_guide = tan_raw.detach()
-        else:
-            skel_guide = skel_logits
-            tan_guide = tan_raw
-
-        # ----- 关键点融合与预测（不再拼接坐标）-----
-        fusion_input = torch.cat([feat_stem, skel_guide, tan_guide], dim=1)
+        # ----- 关键点融合与预测 -----
+        # 使用共享特征 + 原始输入，保留详细信息
+        fusion_input = torch.cat([feat_stem, x], dim=1)
         feat_fuse = self.keypoint_fusion(fusion_input)
         feat_fuse = self.kp_enhance(feat_fuse)  # 2×LKB
         kp_logits = self.keypoints(feat_fuse)  # [B, 2, H, W]
@@ -131,10 +126,37 @@ class DenseHeads(nn.Module):
         }
 
     def _init_weights(self):
-        """稀疏任务偏置初始化 (logits bias = -4.59)"""
+        """
+        完整初始化策略:
+        1. 稀疏任务偏置初始化 (logits bias = -2.19, sigmoid ≈ 0.1)
+        2. 所有输出卷积用小 gain 初始化 (0.1)
+        3. BatchNorm 权重初始化为 1
+        """
+        # 稀疏任务偏置初始化 (更保守的 -2.19)
+        sparse_bias = -2.19  # sigmoid ≈ 0.1
+
         if hasattr(self, "skel_conv") and isinstance(self.skel_conv, nn.Conv2d):
+            nn.init.xavier_normal_(self.skel_conv.weight, gain=0.1)
             if self.skel_conv.bias is not None:
-                nn.init.constant_(self.skel_conv.bias, -4.59)
+                nn.init.constant_(self.skel_conv.bias, sparse_bias)
+
         if hasattr(self, "keypoints") and isinstance(self.keypoints, nn.Conv2d):
+            nn.init.xavier_normal_(self.keypoints.weight, gain=0.1)
             if self.keypoints.bias is not None:
-                nn.init.constant_(self.keypoints.bias, -4.59)
+                nn.init.constant_(self.keypoints.bias, sparse_bias)
+
+        # 其他输出卷积也用小 gain 初始化
+        for conv in [self.tangent, self.width_conv, self.offset_conv]:
+            if isinstance(conv, nn.Conv2d):
+                nn.init.xavier_normal_(conv.weight, gain=0.1)
+                if conv.bias is not None:
+                    nn.init.constant_(conv.bias, 0)
+
+        # BatchNorm 权重初始化为 1
+        for module in self.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                if module.weight is not None:
+                    nn.init.constant_(module.weight, 1)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+                module.momentum = 0.01  # 更小的 momentum，更稳定

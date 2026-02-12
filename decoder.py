@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from RepVit import Conv2d_BN
 from dense_heads import DenseHeads
 from modules import NeXtBlock, GatedCrossAttention
 
@@ -17,16 +16,17 @@ class UniversalDecoder(nn.Module):
 
     通道配置:
     - F1 (Encoder): 32 通道 (固定)
-    - F2 (Encoder): 128 通道 (固定)
-    - F3 (Encoder): embed_dim 通道 (可配置，默认 192)
-    - Decoder 中间层: mid_channels (可配置，默认与 embed_dim 相同)
+    - F2 (Encoder): 64 通道 (timm RepViT)
+    - F3 (Encoder): embed_dim 通道 (默认 64，UNet 瓶颈)
+    - Decoder 渐进升维: c1(64) -> c2(96) -> c3(128) -> 64
+    - 升维后降维，充分利用 skip connection 的高维特征
     """
 
-    def __init__(self, embed_dim=192, mid_channels=None):
+    def __init__(self, embed_dim=64, mid_channels=None):
         """
         Args:
-            embed_dim: Encoder F3 输出的 embedding 维度 (来自 config)
-            mid_channels: Decoder 中间层通道数 (None 时使用 embed_dim)
+            embed_dim: Encoder F3 输出的 embedding 维度 (默认 64，UNet 瓶颈)
+            mid_channels: Decoder 起始通道数 (None 时使用 embed_dim)
         """
         super().__init__()
         self.embed_dim = embed_dim
@@ -43,43 +43,55 @@ class UniversalDecoder(nn.Module):
 
         # Encoder skip dimensions (from encoder.py)
         # 保存为实例变量，用于运行时维度检查
-        self.f2_channels = 128  # 固定值，与 encoder.stem2 输出一致
-        self.f1_channels = 32   # 固定值，与 encoder.stem1 输出一致
+        self.f2_channels = 64   # timm RepViT Stage 2 输出
+        self.f1_channels = 32   # timm RepViT Stage 1 输出
         f2_channels = self.f2_channels
         f1_channels = self.f1_channels
 
-        # Decoder 输出维度 (heads 之前)
-        # 使用渐进式降维: mid_channels -> mid_channels//2 -> 64
-        out_channels = max(64, mid_channels // 2)
+        # ========== 渐进式升维通道配置 ==========
+        # mid_channels (64) -> c1 (64) -> c2 (96) -> c3 (128) -> 64
+        # 逐层升维，充分利用 skip connection 的高维特征
+        c1 = mid_channels           # 64
+        c2 = int(mid_channels * 1.5)  # 96
+        c3 = int(mid_channels * 2)    # 128
 
         # ========== Layer 1: 8x8 -> 16x16 ==========
         self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        # Gated Cross Attention: Decoder (Query) + Encoder F2 (Key/Value)
-        # gate=0 时退化为恒等映射，等价于无 skip
-        self.cross_attn1 = GatedCrossAttention(
-            dim_high=mid_channels, dim_skip=f2_channels, num_heads=4
+        # 升维: c1 -> c2
+        self.proj1 = nn.Sequential(
+            nn.Conv2d(c1, c2, 1, bias=False),
+            nn.BatchNorm2d(c2)
         )
-        self.conv1 = NeXtBlock(mid_channels, mid_channels, kernel_size=7)
+        # Gated Cross Attention: Decoder (Query) + Encoder F2 (Key/Value)
+        self.cross_attn1 = GatedCrossAttention(
+            dim_high=c2, dim_skip=f2_channels, num_heads=4
+        )
+        self.conv1 = NeXtBlock(c2, c2, kernel_size=7)
 
         # ========== Layer 2: 16x16 -> 32x32 ==========
         self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        # 升维: c2 -> c3
+        self.proj2 = nn.Sequential(
+            nn.Conv2d(c2, c3, 1, bias=False),
+            nn.BatchNorm2d(c3)
+        )
         # Gated Cross Attention: Decoder + Encoder F1
         self.cross_attn2 = GatedCrossAttention(
-            dim_high=mid_channels, dim_skip=f1_channels, num_heads=4
+            dim_high=c3, dim_skip=f1_channels, num_heads=4
         )
-        # 降维融合
-        self.fusion2 = nn.Sequential(
-            nn.Conv2d(mid_channels, out_channels, 1, bias=False),
-            nn.BatchNorm2d(out_channels)
-        )
-        self.conv2 = NeXtBlock(out_channels, out_channels, kernel_size=7)
+        self.conv2 = NeXtBlock(c3, c3, kernel_size=7)
 
         # ========== Layer 3: 32x32 -> 64x64 ==========
         self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.conv3 = NeXtBlock(out_channels, out_channels, kernel_size=7)
+        # 降维: c3 -> 64
+        self.proj3 = nn.Sequential(
+            nn.Conv2d(c3, 64, 1, bias=False),
+            nn.BatchNorm2d(64)
+        )
+        self.conv3 = NeXtBlock(64, 64, kernel_size=7)
 
         # ========== Prediction Heads ==========
-        self.heads = DenseHeads(in_channels=out_channels, head_channels=64)
+        self.heads = DenseHeads(in_channels=64, head_channels=64)
 
     def set_skip_mode(self, mode='frozen'):
         """
@@ -127,19 +139,21 @@ class UniversalDecoder(nn.Module):
         f3 = self.f3_proj(f3)
 
         # ========== Block 1 (8 -> 16) ==========
-        d1_up = self.up1(f3)  # [B, mid_channels, 16, 16]
-        d1 = self.cross_attn1(d1_up, f2)  # Gated Cross Attention (skip if f2 is None)
+        d1_up = self.up1(f3)  # [B, c1, 16, 16]
+        d1 = self.proj1(d1_up)  # 升维: c1 -> c2
+        d1 = self.cross_attn1(d1, f2)  # Gated Cross Attention
         d1 = self.conv1(d1)
 
         # ========== Block 2 (16 -> 32) ==========
-        d2_up = self.up2(d1)  # [B, mid_channels, 32, 32]
-        d2 = self.cross_attn2(d2_up, f1)  # Gated Cross Attention
-        d2 = self.fusion2(d2)  # 降维到 out_channels
+        d2_up = self.up2(d1)  # [B, c2, 32, 32]
+        d2 = self.proj2(d2_up)  # 升维: c2 -> c3
+        d2 = self.cross_attn2(d2, f1)  # Gated Cross Attention
         d2 = self.conv2(d2)
 
         # ========== Block 3 (32 -> 64) ==========
-        d3_up = self.up3(d2)
-        d3 = self.conv3(d3_up)  # [B, 64, 64, 64]
+        d3_up = self.up3(d2)  # [B, c3, 64, 64]
+        d3 = self.proj3(d3_up)  # 降维: c3 -> 64
+        d3 = self.conv3(d3)  # [B, 64, 64, 64]
 
         # ========== Prediction ==========
         outputs = self.heads(d3)
