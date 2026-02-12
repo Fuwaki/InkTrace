@@ -1,0 +1,60 @@
+# @package _global_
+# =============================================================================
+# Curriculum Stage 5: Continuous Medium (3-5段连续笔画)
+# =============================================================================
+
+stage:
+  name: curriculum_5
+  description: "3-5段连续笔画训练"
+  init_from: null
+  freeze_encoder: false
+
+# Note: 模型超参数已硬编码在 train_pl.py 中
+# - embed_dim: 64, num_layers: 6, num_heads: 6, dropout: 0.1
+# - decoder_mid_channels: null, decoder_kernel: 7
+# - full_heads: 自动根据 stage 设置 (structural=false, dense=true)
+# - mask_ratio: 0.6, mask_strategy: "block"
+
+# training 覆盖
+training:
+  lr: 5e-4
+  epochs: 15
+  epoch_length: 60000
+  batch_size: 256
+  weight_decay: 1e-4
+  grad_clip: 2.0
+
+  scheduler:
+    type: cosine
+    warmup_epochs: 3
+
+  checkpoint:
+    save_dir: checkpoints/curriculum_5
+    monitor: val/loss
+    keep_top_k: 3
+    save_last: true
+    mode: min
+
+  loss_weights:
+    skeleton: 10.0
+    keypoints: 5.0
+    tangent: 2.0
+    width: 1.0
+    offset: 1.0
+
+  visualization:
+    enabled: true
+    num_samples: 8
+    log_interval: 1
+    log_metrics: true
+
+  init_from: null
+  resume: null
+
+# data 覆盖
+data:
+  curriculum_stage: 5  # 固定curriculum stage
+  img_size: 64
+  batch_size: 256
+  num_workers: 14
+  keypoint_sigma: 2.0

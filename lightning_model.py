@@ -31,19 +31,16 @@ class UnifiedTask(pl.LightningModule):
     def __init__(
         self,
         stage: Literal["structural", "dense"] = "dense",
-        embed_dim: int = 192,  # 与 configs/default.yaml 一致
+        embed_dim: int = 64,           # Encoder embedding 维度
         decoder_mid_channels: Optional[int] = None,  # Decoder 中间层通道数
-        num_layers: int = 4,   # 与 configs/default.yaml 一致
-        num_heads: int = 6,    # Transformer attention heads
+        num_layers: int = 6,              # Transformer 层数
+        num_heads: int = 6,               # Attention heads
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
         loss_weights: Optional[Dict[str, float]] = None,
         mask_ratio: float = 0.6,
         mask_strategy: str = "block",
         grad_clip: float = 1.0,
-        scheduler_type: str = "onecycle",
-        warmup_epochs: int = 2,
-        pct_start: float = 0.1,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -52,9 +49,6 @@ class UnifiedTask(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.grad_clip = grad_clip
-        self.scheduler_type = scheduler_type
-        self.warmup_epochs = warmup_epochs
-        self.pct_start = pct_start
 
         # 创建模型
         # structural: 只输出 skeleton + tangent (full_heads=False)
@@ -176,69 +170,42 @@ class UnifiedTask(pl.LightningModule):
         配置优化器和学习率调度器
 
         优化器: Adan (Adaptive Nesterov Momentum)
-        - 比AdamW收敛更快，性能更好
+        调度器: CosineAnnealingLR (稳定收敛)
 
-        支持多种调度器：
-        - onecycle: OneCycleLR (推荐，训练效果最好)
-        - cosine: CosineAnnealingLR (适合微调)
-        - constant: 固定学习率 (调试用)
-
-        关键点：使用 self.trainer.estimated_stepping_batches 自动计算总步数
+        CosineAnnealingLR 优势：
+        - 平滑学习率衰减
+        - 稳定性好
+        - 适合多阶段训练
         """
         optimizer = Adan(
             filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=self.lr,
             weight_decay=self.weight_decay,
-            betas=(0.98, 0.92, 0.99),  # Adan 推荐的 3 个 beta 值
+            betas=(0.98, 0.92, 0.99),
             eps=1e-8,
             no_prox=False,
             caution=False,
         )
 
-        # 使用 Lightning 内置的步数估计
-        total_steps = self.trainer.estimated_stepping_batches
+        total_epochs = self.trainer.max_epochs
         print(f"\n📊 Optimizer: Adan (lr={self.lr}, wd={self.weight_decay})")
-        print(f"📊 Scheduler: {self.scheduler_type}")
-        print(f"   Total steps: {total_steps}")
+        print(f"📊 Scheduler: CosineAnnealingLR")
+        print(f"   Total epochs: {total_epochs}")
 
-        if self.scheduler_type == "onecycle":
-            scheduler = optim.lr_scheduler.OneCycleLR(
-                optimizer,
-                max_lr=self.lr,
-                total_steps=total_steps,
-                pct_start=self.pct_start,
-                anneal_strategy="cos",
-                div_factor=25.0,  # 初始 lr = max_lr / 25
-                final_div_factor=1e4,  # 最终 lr = max_lr / 1e4
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "step",
-                    "frequency": 1,
-                },
-            }
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=total_epochs,
+            eta_min=self.lr * 0.01,
+        )
 
-        elif self.scheduler_type == "cosine":
-            # CosineAnnealingLR 按 epoch 更新
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=self.trainer.max_epochs,
-                eta_min=self.lr * 0.01,  # 最终 lr = 1% of initial
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "epoch",
-                    "frequency": 1,
-                },
-            }
-
-        else:  # constant
-            # 固定学习率，不使用调度器
-            return optimizer
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
     def on_train_epoch_start(self):
         """Epoch 开始时的回调"""
@@ -254,164 +221,43 @@ class UnifiedTask(pl.LightningModule):
         # 记录当前 epoch
         self.log("train/epoch", float(self.current_epoch))
 
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        """每个 batch 结束时的回调，用于监控训练健康度"""
-        # 记录梯度范数 (每 100 步)
-        # 注意：这是裁剪后的梯度范数，所以大部分 dense 阶段会是 1.0
-        if batch_idx % 100 == 0 and outputs is not None:
-            total_norm = 0.0
-            for p in self.model.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm**0.5
-            self.log("train/grad_norm", total_norm)
-
-    def on_before_optimizer_step(self, optimizer):
-        """在 optimizer.step() 之前调用（梯度裁剪前）"""
-        # 记录裁剪前的真实梯度范数
-        if self.trainer.global_step % 100 == 0:
-            total_norm = 0.0
-            for p in self.model.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm**0.5
-            self.log("train/grad_norm_before_clip", total_norm)
-
     # =========================================================================
-    # 权重加载工具方法
+    # Checkpoint 钩子（保存/加载元数据）
     # =========================================================================
 
-    def load_pretrained_weights(
-        self,
-        checkpoint_path: str,
-        strict: bool = False,
-        freeze_encoder: bool = False,
-    ):
+    def on_save_checkpoint(self, checkpoint):
         """
-        从 checkpoint 加载预训练权重
+        Lightning 钩子：保存 checkpoint 时添加元数据
 
         Args:
-            checkpoint_path: checkpoint 文件路径
-            strict: 是否严格匹配 (False 允许部分加载，适合迁移学习)
-            freeze_encoder: 是否冻结 Encoder 权重
+            checkpoint: Lightning checkpoint 字典
         """
-        print(f"📦 Loading weights from: {checkpoint_path}")
+        from datetime import datetime
 
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
-
-        # 支持多种 checkpoint 格式
-        if "state_dict" in ckpt:
-            # Lightning checkpoint
-            state_dict = ckpt["state_dict"]
-            # 移除 "model." 前缀 (如果存在)
-            state_dict = {
-                k.replace("model.", ""): v
-                for k, v in state_dict.items()
-                if k.startswith("model.")
-            }
-        elif "model_state_dict" in ckpt:
-            # 旧版手动 checkpoint
-            state_dict = ckpt["model_state_dict"]
-        else:
-            state_dict = ckpt
-
-        # 加载权重
-        incompatible = self.model.load_state_dict(state_dict, strict=strict)
-
-        if incompatible.missing_keys:
-            print(f"  ⚠️ Missing keys: {len(incompatible.missing_keys)}")
-            if len(incompatible.missing_keys) <= 10:
-                for k in incompatible.missing_keys:
-                    print(f"     - {k}")
-        if incompatible.unexpected_keys:
-            print(f"  ⚠️ Unexpected keys: {len(incompatible.unexpected_keys)}")
-
-        # 冻结 Encoder
-        if freeze_encoder:
-            print("  🔒 Freezing encoder weights")
-            for param in self.model.encoder.parameters():
-                param.requires_grad = False
-
-        print("  ✅ Weights loaded successfully")
-
-    @classmethod
-    def load_from_checkpoint_with_stage(
-        cls,
-        checkpoint_path: str,
-        stage: Literal["structural", "dense"],
-        strict: bool = False,
-        **kwargs,
-    ) -> "UnifiedTask":
-        """
-        从 checkpoint 加载模型，同时支持切换训练阶段
-
-        用于从 structural 迁移到 dense 阶段
-
-        Args:
-            checkpoint_path: checkpoint 路径
-            stage: 目标训练阶段
-            strict: 是否严格匹配
-            **kwargs: 传递给 __init__ 的额外参数
-        """
-        # 加载 checkpoint 获取超参数
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
-        hparams = ckpt.get("hyper_parameters", {})
-
-        # 从 checkpoint 获取模型配置，但使用新的 stage
-        model_kwargs = {
-            "embed_dim": hparams.get("embed_dim", 192),  # 与 configs/default.yaml 一致
-            "decoder_mid_channels": hparams.get("decoder_mid_channels"),  # 可为 None
-            "num_layers": hparams.get("num_layers", 4),   # 与 configs/default.yaml 一致
-            "stage": stage,  # 使用新的 stage
+        # 添加自定义元数据
+        checkpoint['metadata'] = {
+            'model_version': 'v1.0',
+            'save_time': datetime.now().isoformat(),
+            'model_type': self.hparams.get('stage', 'unknown'),
         }
-        model_kwargs.update(kwargs)
+        return checkpoint
 
-        # 创建新模型
-        model = cls(**model_kwargs)
+    def on_load_checkpoint(self, checkpoint):
+        """
+        Lightning 钩子：加载 checkpoint 时恢复元数据
 
-        # 加载权重 (非严格模式，因为 head 可能不同)
-        model.load_pretrained_weights(checkpoint_path, strict=strict)
+        Args:
+            checkpoint: Lightning checkpoint 字典
+        """
+        if 'metadata' in checkpoint:
+            metadata = checkpoint['metadata']
+            print(f"\n{'='*60}")
+            print(f"📦 Checkpoint Metadata:")
+            print(f"   Version: {metadata.get('model_version', 'unknown')}")
+            print(f"   Saved at: {metadata.get('save_time', 'unknown')}")
+            print(f"   Model type: {metadata.get('model_type', 'unknown')}")
+            print(f"{'='*60}\n")
+        return checkpoint
 
-        return model
-
-
-class CurriculumCallback(pl.Callback):
-    """
-    Curriculum Learning 回调
-
-    根据 epoch 自动更新数据集的 curriculum stage
-    """
-
-    def __init__(
-        self,
-        start_stage: int = 0,
-        end_stage: int = 9,
-        epochs_per_stage: int = 10,
-    ):
-        super().__init__()
-        self.start_stage = start_stage
-        self.end_stage = end_stage
-        self.epochs_per_stage = epochs_per_stage
-        self.current_stage = start_stage
-
-    def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
-        """每个 epoch 开始时检查是否需要更新 curriculum"""
-        epoch = trainer.current_epoch
-        target_stage = self.start_stage + (epoch // self.epochs_per_stage)
-        target_stage = min(target_stage, self.end_stage)
-
-        if target_stage != self.current_stage:
-            old_stage = self.current_stage
-            self.current_stage = target_stage
-
-            # 更新 DataModule 的 curriculum
-            if hasattr(trainer, "datamodule") and hasattr(
-                trainer.datamodule, "set_curriculum"
-            ):
-                trainer.datamodule.set_curriculum(target_stage)
-                print(f"\n📈 Curriculum Update: Stage {old_stage} -> {target_stage}")
-
-            # 记录到日志
-            pl_module.log("curriculum/stage", float(target_stage))
+# CurriculumCallback 已移除 - curriculum stage 现在通过配置文件静态设置
+# 参考：conf/stage/curriculum_*.yaml 配置文件

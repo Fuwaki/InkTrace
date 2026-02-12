@@ -63,10 +63,13 @@ hydra:
         python train_pl.py stage=<stage_name> [overrides...]
 
       可用阶段:
-        - structural: 结构预训练 (遮挡重建)
-        - dense:      密集预测训练 (多任务学习)
-        - finetune:   端到端微调
-        - debug:      快速调试配置
+        - structural:     结构预训练 (遮挡重建, curriculum_stage=2)
+        - dense:          密集预测训练 (多任务学习, curriculum_stage=4)
+        - curriculum_4:   Curriculum Stage 4 (2-3段连续笔画)
+        - curriculum_5:   Curriculum Stage 5 (3-5段连续笔画)
+        - curriculum_6:   Curriculum Stage 6 (4-8段连续笔画)
+        - finetune:       端到端微调
+        - debug:          快速调试配置
 
       常用覆盖参数:
         training.lr=<float>           学习率

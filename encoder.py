@@ -100,7 +100,7 @@ class StrokeEncoder(nn.Module):
                 features: [f1, f2, f3_enhanced] (spatially organized)
                   - f1: [B, 32, 32, 32]
                   - f2: [B, 128, 16, 16]
-                  - f3_enhanced: [B, 128, 8, 8]
+                  - f3_enhanced: [B, embed_dim, 8, 8] (embed_dim 可配置, 例如 192)
                 embeddings: [B, 64, embed_dim] (same as default return)
         """
         B = x.shape[0]
@@ -139,12 +139,10 @@ class StrokeEncoder(nn.Module):
         if return_interm_layers:
             # Reshape embeddings back to spatial [B, C, H, W] for F3
             # embeddings: [B, 64, embed_dim] -> [B, embed_dim, 8, 8]
-            # But decoder expects 128 channels, so we need a projection
             H = W = self.spatial_size  # 8
-            # Project back to feature_dim (128) if embed_dim != 128
             f3_enhanced = embeddings.transpose(1, 2).reshape(
                 B, -1, H, W
-            )  # [B, embed_dim, 8, 8]
+            )  # [B, embed_dim, 8, 8] (embed_dim 可配置, 例如 192)
             return [f1, f2, f3_enhanced], embeddings
 
         return embeddings

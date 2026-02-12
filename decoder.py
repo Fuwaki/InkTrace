@@ -42,8 +42,11 @@ class UniversalDecoder(nn.Module):
             self.f3_proj = nn.Conv2d(embed_dim, mid_channels, 1)
 
         # Encoder skip dimensions (from encoder.py)
-        f2_channels = 128  # 固定值，与 encoder.stem2 输出一致
-        f1_channels = 32   # 固定值，与 encoder.stem1 输出一致
+        # 保存为实例变量，用于运行时维度检查
+        self.f2_channels = 128  # 固定值，与 encoder.stem2 输出一致
+        self.f1_channels = 32   # 固定值，与 encoder.stem1 输出一致
+        f2_channels = self.f2_channels
+        f1_channels = self.f1_channels
 
         # Decoder 输出维度 (heads 之前)
         # 使用渐进式降维: mid_channels -> mid_channels//2 -> 64
@@ -104,6 +107,14 @@ class UniversalDecoder(nn.Module):
         # Handle input format
         if isinstance(features, (list, tuple)):
             f1, f2, f3 = features
+
+            # 运行时维度检查：防止 encoder/decoder 通道不匹配
+            if f1 is not None:
+                assert f1.shape[1] == self.f1_channels, \
+                    f"F1 通道不匹配: 期望 {self.f1_channels}, 实际 {f1.shape[1]}"
+            if f2 is not None:
+                assert f2.shape[1] == self.f2_channels, \
+                    f"F2 通道不匹配: 期望 {self.f2_channels}, 实际 {f2.shape[1]}"
         else:
             f3 = features
             f1, f2 = None, None

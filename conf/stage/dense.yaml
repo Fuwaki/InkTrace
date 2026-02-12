@@ -48,13 +48,6 @@ training:
     width: 1.0
     offset: 1.0
 
-  # Curriculum Learning
-  curriculum:
-    enabled: true
-    start_stage: 4         # 从 stage 4 开始
-    end_stage: 6
-    epochs_per_stage: 15   # 每阶段训练久一点
-
   visualization:
     enabled: true
     num_samples: 8

@@ -99,70 +99,7 @@ class MaskingGenerator:
         return mask
 
 
-# =============================================================================
-# Structural Pretraining Loss
-# =============================================================================
 
-
-class StructuralPretrainLoss(nn.Module):
-    """
-    结构预训练 Loss
-    核心目标：让 Encoder 学会从残缺输入推断完整的骨架结构和笔画方向
-
-    L = L_skeleton + λ * L_tangent
-    """
-
-    def __init__(self, skeleton_weight=1.0, tangent_weight=1.0):
-        super().__init__()
-        self.skeleton_weight = skeleton_weight
-        self.tangent_weight = tangent_weight
-
-    def _dice_loss(self, pred, target, smooth=1.0):
-        pred = pred.float().contiguous()
-        target = target.float().contiguous()
-        intersection = (pred * target).sum(dim=[2, 3])
-        loss = 1 - (
-            (2.0 * intersection + smooth)
-            / (pred.sum(dim=[2, 3]) + target.sum(dim=[2, 3]) + smooth)
-        )
-        return loss.mean()
-
-    def _bce_loss(self, pred, target):
-        pred = pred.float().clamp(min=1e-6, max=1 - 1e-6)
-        target = target.float()
-        logits = torch.log(pred / (1 - pred))
-        return F.binary_cross_entropy_with_logits(logits, target, reduction="mean")
-
-    def forward(self, pred_skeleton, pred_tangent, gt_skeleton, gt_tangent, mask=None):
-        """
-        Args:
-            pred_skeleton: [B, 1, H, W] 预测骨架
-            pred_tangent: [B, 2, H, W] 预测切向场
-            gt_skeleton: [B, 1, H, W] GT 骨架
-            gt_tangent: [B, 2, H, W] GT 切向场
-            mask: [B, 1, H, W] 遮挡掩码 (可选，用于只在遮挡区域计算 loss)
-        Returns:
-            losses: dict
-        """
-        losses = {}
-
-        # 1. Skeleton Loss (BCE + Dice)
-        bce_skel = self._bce_loss(pred_skeleton, gt_skeleton)
-        dice_skel = self._dice_loss(pred_skeleton, gt_skeleton)
-        losses["loss_skeleton"] = self.skeleton_weight * (bce_skel + dice_skel)
-
-        # 2. Tangent Loss (只在骨架区域计算)
-        skel_mask = (gt_skeleton > 0.5).float()
-        num_fg = skel_mask.sum().clamp(min=1.0)
-
-        # L2 loss on tangent field
-        l2_tan = (pred_tangent - gt_tangent) ** 2
-        l2_tan = (l2_tan * skel_mask).sum() / num_fg / 2.0
-        losses["loss_tangent"] = self.tangent_weight * l2_tan
-
-        losses["total"] = losses["loss_skeleton"] + losses["loss_tangent"]
-
-        return losses
 
 
 class UnifiedModel(nn.Module):
@@ -242,10 +179,10 @@ class ModelFactory:
 
     @staticmethod
     def create_unified_model(
-        embed_dim=192,
+        embed_dim=64,
         decoder_mid_channels=None,
         num_heads=6,
-        num_layers=4,
+        num_layers=6,
         full_heads=True,
         device="cpu",
         encoder_ckpt=None,
@@ -302,10 +239,10 @@ class ModelFactory:
         """加载统一模型"""
         checkpoint = torch.load(checkpoint_path, map_location=device)
 
-        # 从 checkpoint 获取配置，或使用默认值
+        # 从 checkpoint 获取配置，或使用默认值（与 train_pl.py 一致）
         config = checkpoint.get("config", {})
-        embed_dim = config.get("embed_dim", 192)  # 与 configs/default.yaml 一致
-        num_layers = config.get("num_layers", 4)   # 与 configs/default.yaml 一致
+        embed_dim = config.get("embed_dim", 64)
+        num_layers = config.get("num_layers", 6)
 
         model = ModelFactory.create_unified_model(
             embed_dim=embed_dim,

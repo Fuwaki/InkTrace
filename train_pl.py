@@ -47,32 +47,9 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from lightning_model import UnifiedTask, CurriculumCallback
+from lightning_model import UnifiedTask
 from lightning_data import InkTraceDataModule
 from lightning_vis import VisualizationCallback
-
-
-# =============================================================================
-# 模型超参数 (硬编码在代码中)
-# =============================================================================
-
-# Encoder 配置
-DEFAULT_EMBED_DIM = 64      # Transformer embedding 维度
-DEFAULT_NUM_LAYERS = 6      # Transformer 层数
-DEFAULT_NUM_HEADS = 6       # Attention 头数 (embed_dim/num_heads=32, 标准 head_dim)
-DEFAULT_DROPOUT = 0.1       # Dropout 率
-
-# Decoder 配置
-DEFAULT_DECODER_MID_CHANNELS = None  # Decoder 中间层通道数 (None=使用 embed_dim)
-DEFAULT_DECODER_KERNEL = 7           # NeXtBlock kernel size (固定值)
-
-# 训练模式
-DEFAULT_FULL_HEADS = True      # 是否输出全部 5 个预测头
-
-# Structural 预训练配置
-DEFAULT_MASK_RATIO = 0.6       # 遮挡比例 (0.0-1.0)
-DEFAULT_MASK_STRATEGY = "block"  # 遮挡策略: "block" | "random"
-DEFAULT_MASK_BLOCK_SIZE = 8     # block 策略时的块大小 (像素)
 
 
 # =============================================================================
@@ -116,13 +93,6 @@ def print_config(cfg: DictConfig) -> None:
         print(f"   {cfg.stage.description}")
     print(f"{'─' * 60}")
 
-    print("  Model (fixed in code):")
-    print(f"    embed_dim: {DEFAULT_EMBED_DIM}")
-    print(f"    num_layers: {DEFAULT_NUM_LAYERS}")
-    print(f"    num_heads: {DEFAULT_NUM_HEADS}")
-    print(f"    full_heads: {DEFAULT_FULL_HEADS}")
-    print(f"    mask_ratio: {DEFAULT_MASK_RATIO}")
-
     print("  Training:")
     print(f"    lr: {cfg.training.lr}")
     print(f"    epochs: {cfg.training.epochs}")
@@ -132,11 +102,6 @@ def print_config(cfg: DictConfig) -> None:
     print("  Data:")
     print(f"    curriculum_stage: {cfg.data.curriculum_stage}")
     print(f"    num_workers: {cfg.data.num_workers}")
-
-    if cfg.training.curriculum.get("enabled", False):
-        print("  Curriculum Learning:")
-        print(f"    stages: {cfg.training.curriculum.start_stage} -> {cfg.training.curriculum.end_stage}")
-        print(f"    epochs_per_stage: {cfg.training.curriculum.epochs_per_stage}")
 
     if cfg.stage.get("init_from"):
         print(f"  Init from: {cfg.stage.init_from}")
@@ -223,22 +188,7 @@ def create_trainer(cfg: DictConfig, resume_from: Optional[str] = None) -> pl.Tra
     except Exception:
         pass
 
-    # 4. Curriculum Learning Callback
-    if training.curriculum.get("enabled", False):
-        curriculum_callback = CurriculumCallback(
-            start_stage=int(training.curriculum.start_stage),
-            end_stage=int(training.curriculum.end_stage),
-            epochs_per_stage=int(training.curriculum.epochs_per_stage),
-        )
-        callbacks.append(curriculum_callback)
-        print(
-            f"📈 Curriculum Learning: "
-            f"stage {training.curriculum.start_stage} -> "
-            f"{training.curriculum.end_stage}, "
-            f"{training.curriculum.epochs_per_stage} epochs/stage"
-        )
-
-    # 5. Visualization Callback
+    # 4. Visualization Callback
     vis_config = training.visualization
     if vis_config.get("enabled", True):
         # Dense 阶段自动启用完整可视化 (16列，包含所有预测头)
@@ -325,12 +275,6 @@ def run_training(cfg: DictConfig, resume_from: Optional[str] = None) -> str:
     training = cfg.training
     data_cfg = cfg.data
 
-    # 处理 init_from
-    # 优先级：resume > stage.init_from > training.init_from > None
-    effective_init_from = None
-    if resume_from is None:
-        effective_init_from = cfg.stage.get("init_from") or training.get("init_from")
-
     # =========================================================================
     # 创建 DataModule
     # =========================================================================
@@ -349,30 +293,13 @@ def run_training(cfg: DictConfig, resume_from: Optional[str] = None) -> str:
     # =========================================================================
     # 创建模型 (使用硬编码的超参数)
     # =========================================================================
-    scheduler_cfg = training.scheduler
-
     model = UnifiedTask(
         stage=stage_name if stage_name != "debug" else "dense",
-        embed_dim=DEFAULT_EMBED_DIM,
-        decoder_mid_channels=DEFAULT_DECODER_MID_CHANNELS,
-        num_layers=DEFAULT_NUM_LAYERS,
         lr=float(training.lr),
         weight_decay=float(training.weight_decay),
         loss_weights=training.get("loss_weights"),
-        mask_ratio=DEFAULT_MASK_RATIO,
-        mask_strategy=DEFAULT_MASK_STRATEGY,
         grad_clip=float(training.grad_clip),
-        scheduler_type=scheduler_cfg.get("type", "onecycle"),
-        warmup_epochs=int(scheduler_cfg.get("warmup_epochs", 2)),
-        pct_start=float(scheduler_cfg.get("pct_start", 0.1)),
     )
-
-    # 从 checkpoint 初始化权重 (迁移学习)
-    if effective_init_from and not resume_from:
-        freeze_encoder = cfg.stage.get("freeze_encoder", False)
-        model.load_pretrained_weights(
-            effective_init_from, strict=False, freeze_encoder=freeze_encoder
-        )
 
     # =========================================================================
     # 创建 Trainer
