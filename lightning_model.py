@@ -1,21 +1,9 @@
-"""
-PyTorch Lightning Module for InkTrace
-
-支持两种训练阶段：
-- structural: 结构预训练 (遮挡重建)
-- dense: 密集预测训练 (多任务学习)
-
-核心改进：
-- 使用 self.trainer.estimated_stepping_batches 自动计算 OneCycleLR 步数
-- 支持多种学习率调度器 (OneCycleLR, CosineAnnealingLR, Constant)
-- 自动处理 Curriculum Learning
-- 简化的权重加载和迁移学习
-"""
 
 import torch
 import torch.optim as optim
 import pytorch_lightning as pl
 from typing import Dict, Optional, Literal
+from timm.optim.adan import Adan
 
 from models import ModelFactory, MaskingGenerator, StructuralPretrainLoss
 from losses import DenseLoss
@@ -24,7 +12,6 @@ from vis_core import compute_metrics
 
 class UnifiedTask(pl.LightningModule):
     """
-    统一的 Lightning Module，支持 structural 和 dense 两种训练阶段
 
     Args:
         stage: 训练阶段 ("structural" 或 "dense")
@@ -70,7 +57,9 @@ class UnifiedTask(pl.LightningModule):
         self.pct_start = pct_start
 
         # 创建模型
-        full_heads = stage == "dense"
+        # structural: 只输出 skeleton + tangent (full_heads=False)
+        # dense/finetune/debug: 输出全部 5 个头 (full_heads=True)
+        full_heads = stage != "structural"
         self.model = ModelFactory.create_unified_model(
             embed_dim=embed_dim,
             decoder_mid_channels=decoder_mid_channels,
@@ -186,6 +175,9 @@ class UnifiedTask(pl.LightningModule):
         """
         配置优化器和学习率调度器
 
+        优化器: Adan (Adaptive Nesterov Momentum)
+        - 比AdamW收敛更快，性能更好
+
         支持多种调度器：
         - onecycle: OneCycleLR (推荐，训练效果最好)
         - cosine: CosineAnnealingLR (适合微调)
@@ -193,19 +185,21 @@ class UnifiedTask(pl.LightningModule):
 
         关键点：使用 self.trainer.estimated_stepping_batches 自动计算总步数
         """
-        optimizer = optim.AdamW(
+        optimizer = Adan(
             filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=self.lr,
             weight_decay=self.weight_decay,
-            betas=(0.9, 0.999),
+            betas=(0.98, 0.92, 0.99),  # Adan 推荐的 3 个 beta 值
             eps=1e-8,
+            no_prox=False,
+            caution=False,
         )
 
         # 使用 Lightning 内置的步数估计
         total_steps = self.trainer.estimated_stepping_batches
-        print(f"\n📊 Scheduler: {self.scheduler_type}")
+        print(f"\n📊 Optimizer: Adan (lr={self.lr}, wd={self.weight_decay})")
+        print(f"📊 Scheduler: {self.scheduler_type}")
         print(f"   Total steps: {total_steps}")
-        print(f"   Learning rate: {self.lr}")
 
         if self.scheduler_type == "onecycle":
             scheduler = optim.lr_scheduler.OneCycleLR(

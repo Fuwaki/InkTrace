@@ -2,76 +2,7 @@ import torch
 import torch.nn as nn
 import math
 from RepVit import RepViTBlock, Conv2d_BN, _make_divisible
-
-
-class AddCoords(nn.Module):
-    """
-    自动添加坐标通道，支持高频（Fourier）坐标注入
-    输入: [B, C, H, W]
-    输出: [B, C + added_channels, H, W]
-    """
-
-    def __init__(self, num_freqs=2, height=64, width=64):
-        super().__init__()
-        self.num_freqs = num_freqs
-        self.height = height
-        self.width = width
-        self.added_channels = 2 + (self.num_freqs * 4)
-
-        # 执行预计算
-        self._precompute_coords()
-
-    def _precompute_coords(self):
-        # 1. 使用 meshgrid 生成完整的 HxW 网格 (更直观，且自动处理广播)
-        # indexing='ij' 保证 y 在前 (H), x 在后 (W)
-        yy = torch.linspace(-1, 1, self.height)
-        xx = torch.linspace(-1, 1, self.width)
-        grid_y, grid_x = torch.meshgrid(yy, xx, indexing="ij")
-
-        # grid_y, grid_x 形状均为 [H, W]
-        # 扩展维度以便拼接: [H, W] -> [1, H, W]
-        grid_x = grid_x.unsqueeze(0)
-        grid_y = grid_y.unsqueeze(0)
-
-        # 2. 收集所有坐标特征
-        coords_list = [grid_x, grid_y]  # 基础线性坐标
-
-        # 3. 生成 Fourier 特征 (所有特征都必须是 [1, H, W] 形状)
-        for i in range(self.num_freqs):
-            freq = (2.0**i) * math.pi
-            coords_list.extend(
-                [
-                    torch.sin(freq * grid_x),
-                    torch.cos(freq * grid_x),
-                    torch.sin(freq * grid_y),
-                    torch.cos(freq * grid_y),
-                ]
-            )
-
-        # 4. 拼接所有特征通道
-        # 结果形状: [added_channels, H, W]
-        full_coords = torch.cat(coords_list, dim=0)
-
-        # 5. 增加 Batch 维度并注册为 Buffer
-        # 最终形状: [1, added_channels, H, W]
-        self.register_buffer("cached_coords", full_coords.unsqueeze(0))
-
-    def forward(self, x):
-        B, _, H, W = x.shape
-
-        # 简单的尺寸检查
-        if H != self.height or W != self.width:
-            # 如果尺寸变了（动态输入），这里需要重新计算或者报错
-            # 为保证鲁棒性，建议报错，或者在这里动态生成（会慢一点）
-            raise ValueError(
-                f"Input size ({H}, {W}) doesn't match precomputed size ({self.height}, {self.width})"
-            )
-
-        # 直接 Expand 并拼接，效率最高
-        # cached_coords: [1, C_add, H, W] -> [B, C_add, H, W]
-        coords = self.cached_coords.expand(B, -1, -1, -1)
-
-        return torch.cat([x, coords], dim=1)
+from modules import AddCoords
 
 
 class StrokeEncoder(nn.Module):

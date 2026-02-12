@@ -1,0 +1,62 @@
+training:
+  lr: 0.0005
+  batch_size: 256
+  epochs: 90
+  epoch_length: 60000
+  weight_decay: 0.0001
+  grad_clip: 2.0
+  scheduler:
+    type: onecycle
+    warmup_epochs: 5
+    pct_start: 0.05
+  checkpoint:
+    save_dir: checkpoints/dense
+    keep_top_k: 5
+    save_last: true
+    monitor: val/loss
+    mode: min
+  loss_weights:
+    skeleton: 10.0
+    keypoints: 5.0
+    tangent: 2.0
+    width: 1.0
+    offset: 1.0
+  curriculum:
+    enabled: true
+    start_stage: 4
+    end_stage: 6
+    epochs_per_stage: 15
+  visualization:
+    enabled: true
+    num_samples: 8
+    log_interval: 1
+    log_metrics: true
+  init_from: null
+  resume: null
+data:
+  img_size: 64
+  batch_size: 256
+  num_workers: 14
+  pin_memory: true
+  persistent_workers: true
+  rust_threads: 16
+  curriculum_stage: 4
+  keypoint_sigma: 2.0
+logging:
+  log_interval: 20
+  tensorboard_dir: runs
+device:
+  accelerator: gpu
+  precision: bf16-mixed
+pipeline:
+  order:
+  - structural
+  - dense
+  auto_transfer: true
+print_config: false
+seed: 114514
+stage:
+  name: dense
+  description: 密集预测训练：多任务学习
+  init_from: null
+  freeze_encoder: false

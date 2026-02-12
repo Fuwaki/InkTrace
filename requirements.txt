@@ -19,3 +19,7 @@ timm
 # PyTorch Lightning
 pytorch-lightning>=2.0.0
 rich  # 用于美化进度条 (可选)
+
+# 配置管理
+hydra-core>=1.3.0
+omegaconf>=2.3.0

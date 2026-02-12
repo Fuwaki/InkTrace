@@ -2,34 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from RepVit import Conv2d_BN
-
-
-# =============================================================================
-# Multi-Scale Context Modules
-# =============================================================================
-
-
-class LargeKernelBlock(nn.Module):
-    """单层大核卷积，类似 ConvNeXt 风格的轻量大感受野块"""
-
-    def __init__(self, dim, kernel_size=11):
-        super().__init__()
-        self.dwconv = nn.Conv2d(
-            dim, dim, kernel_size, padding=kernel_size // 2, groups=dim
-        )
-        self.norm = nn.BatchNorm2d(dim)
-        self.pwconv = nn.Sequential(
-            nn.Conv2d(dim, dim * 2, 1),
-            nn.GELU(),
-            nn.Conv2d(dim * 2, dim, 1),
-        )
-
-    def forward(self, x):
-        out = self.dwconv(x)
-        out = self.norm(out)
-        out = self.pwconv(out)
-        return x + out
-
+from modules import LargeKernelBlock,AddCoords
 
 class DenseHeads(nn.Module):
     """
@@ -49,13 +22,14 @@ class DenseHeads(nn.Module):
     def __init__(self, in_channels, head_channels=64, detach_guidance=False):
         super().__init__()
         self.detach_guidance = detach_guidance
+        self.add_coords = AddCoords(height=64, width=64)
 
         # ==========================================
         # Shared Stem with Early Coordinate Injection
         # ==========================================
         # 输入特征 + 2通道坐标网格 -> 调整通道 -> 强特征提取
         self.coord_conv = nn.Sequential(
-            Conv2d_BN(in_channels + 2, head_channels, 3, 1, 1),  # 含 BN
+            Conv2d_BN(in_channels + 6, head_channels, 3, 1, 1),  # 含 BN
             nn.GELU(),
         )
         self.shared_blocks = nn.Sequential(
@@ -112,21 +86,7 @@ class DenseHeads(nn.Module):
         """
         B, _, H, W = x.shape
 
-        # ----- 生成坐标网格（[-1, 1] 归一化）-----
-        y_grid = (
-            torch.linspace(-1, 1, H, device=x.device)
-            .view(1, 1, H, 1)
-            .expand(B, 1, H, W)
-        )
-        x_grid = (
-            torch.linspace(-1, 1, W, device=x.device)
-            .view(1, 1, 1, W)
-            .expand(B, 1, H, W)
-        )
-        coord = torch.cat([x_grid, y_grid], dim=1)  # [B, 2, H, W]
-
-        # ----- 坐标注入 + 共享特征提取 -----
-        x_with_coord = torch.cat([x, coord], dim=1)  # [B, C+2, H, W]
+        x_with_coord = self.add_coords(x)  # [B, C+6, H, W]
         feat_stem = self.coord_conv(x_with_coord)  # [B, head_channels, H, W]
         feat_stem = self.shared_blocks(feat_stem)  # 2×LKB
 

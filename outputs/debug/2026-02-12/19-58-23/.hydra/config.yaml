@@ -1,0 +1,73 @@
+model:
+  embed_dim: 64
+  num_layers: 6
+  num_heads: 6
+  dropout: 0.1
+  decoder_mid_channels: null
+  decoder_kernel: 7
+  full_heads: true
+  mask_ratio: 0.6
+  mask_strategy: block
+  mask_block_size: 8
+training:
+  lr: 0.001
+  batch_size: 32
+  epochs: 2
+  epoch_length: 320
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  scheduler:
+    type: onecycle
+    warmup_epochs: 3
+    pct_start: 0.1
+  checkpoint:
+    save_dir: checkpoints/debug
+    keep_top_k: 1
+    save_last: true
+    monitor: val/loss
+    mode: min
+  loss_weights:
+    skeleton: 10.0
+    keypoints: 7.0
+    tangent: 2.0
+    width: 1.0
+    offset: 1.0
+  curriculum:
+    enabled: false
+    start_stage: 0
+    end_stage: 6
+    epochs_per_stage: 15
+  visualization:
+    enabled: true
+    num_samples: 2
+    log_interval: 1
+    log_metrics: true
+  init_from: null
+  resume: null
+data:
+  img_size: 64
+  batch_size: 32
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  rust_threads: 4
+  curriculum_stage: 0
+  keypoint_sigma: 2.0
+logging:
+  log_interval: 20
+  tensorboard_dir: runs
+device:
+  accelerator: gpu
+  precision: bf16-mixed
+pipeline:
+  order:
+  - structural
+  - dense
+  auto_transfer: true
+print_config: true
+seed: 114514
+stage:
+  name: debug
+  description: 快速调试配置
+  init_from: null
+  freeze_encoder: false

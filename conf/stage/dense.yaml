@@ -1,0 +1,76 @@
+# @package _global_
+# =============================================================================
+# Phase 2: Dense Prediction Training (密集预测训练)
+# =============================================================================
+# 目标：训练完整的 5-head 密集预测
+# 方法：多任务学习 (Skeleton + Keypoints + Tangent + Width + Offset)
+# 特点：从 structural checkpoint 初始化，使用 curriculum learning
+# =============================================================================
+
+stage:
+  name: dense
+  description: "密集预测训练：多任务学习"
+  init_from: null        # null = 使用上一阶段最优; 或指定路径
+  freeze_encoder: false  # 是否冻结 Encoder
+
+# Note: 模型超参数已硬编码在 train_pl.py 中
+# - embed_dim: 64, num_layers: 6, num_heads: 6, dropout: 0.1
+# - decoder_mid_channels: null, decoder_kernel: 7
+# - full_heads: 自动根据 stage 设置 (structural=false, dense=true)
+# - mask_ratio: 0.6, mask_strategy: "block"
+
+# training 覆盖
+training:
+  lr: 5e-4             # 比预训练低，更稳定
+  epochs: 90           # 增加轮数
+  epoch_length: 60000  # 6x 数据量 (6M total)
+  batch_size: 256
+  weight_decay: 1e-4
+  grad_clip: 2.0
+
+  scheduler:
+    type: onecycle
+    warmup_epochs: 5
+    pct_start: 0.05    # 更短的 warmup
+
+  checkpoint:
+    save_dir: checkpoints/dense
+    monitor: val/loss
+    keep_top_k: 5
+    save_last: true
+    mode: min
+
+  # Loss 权重 (精调)
+  loss_weights:
+    skeleton: 10.0     # 最重要
+    keypoints: 5.0     # 关键点
+    tangent: 2.0       # 对曲线拟合重要
+    width: 1.0
+    offset: 1.0
+
+  # Curriculum Learning
+  curriculum:
+    enabled: true
+    start_stage: 4         # 从 stage 4 开始
+    end_stage: 6
+    epochs_per_stage: 15   # 每阶段训练久一点
+
+  visualization:
+    enabled: true
+    num_samples: 8
+    log_interval: 1
+    log_metrics: true
+
+  init_from: null
+  resume: null
+
+# data 覆盖
+data:
+  img_size: 64
+  batch_size: 256
+  num_workers: 14
+  pin_memory: true
+  persistent_workers: true
+  rust_threads: 16
+  curriculum_stage: 4  # 与 start_stage 保持一致
+  keypoint_sigma: 2.0

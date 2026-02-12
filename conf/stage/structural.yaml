@@ -1,0 +1,72 @@
+# @package _global_
+# =============================================================================
+# Phase 1: Structural Pretraining (结构预训练)
+# =============================================================================
+# 目标：让 Encoder 学会从残缺输入推断完整结构
+# 方法：Masking + Reconstruction (类似 MAE)
+# 特点：关闭跳连，强迫 Encoder 在 bottleneck 编码完整信息
+# =============================================================================
+
+stage:
+  name: structural
+  description: "结构预训练：遮挡重建任务"
+  init_from: null
+  freeze_encoder: false
+
+# Note: 模型超参数已硬编码在 train_pl.py 中
+# - embed_dim: 64, num_layers: 6, num_heads: 6, dropout: 0.1
+# - decoder_mid_channels: null, decoder_kernel: 7
+# - full_heads: 自动根据 stage 设置 (structural=false, dense=true)
+# - mask_ratio: 0.6, mask_strategy: "block"
+
+# training 覆盖
+training:
+  lr: 1e-3
+  epochs: 40           # 增加轮数适应大数据
+  epoch_length: 40000  # 4x 数据量 (1.6M total)
+  batch_size: 256
+  weight_decay: 1e-4
+  grad_clip: 1.0
+
+  scheduler:
+    type: onecycle
+    warmup_epochs: 5
+    pct_start: 0.1
+
+  checkpoint:
+    save_dir: checkpoints/structural
+    monitor: train/loss  # 预训练无验证集
+    keep_top_k: 3
+    save_last: true
+    mode: min
+
+  # Loss 权重 (仅 skeleton + tangent)
+  loss_weights:
+    skeleton: 1.0
+    tangent: 1.0
+
+  curriculum:
+    enabled: false     # 预训练不用 curriculum
+    start_stage: 0
+    end_stage: 6
+    epochs_per_stage: 15
+
+  visualization:
+    enabled: true
+    num_samples: 8
+    log_interval: 2
+    log_metrics: true
+
+  init_from: null
+  resume: null
+
+# data 覆盖
+data:
+  img_size: 64
+  batch_size: 256
+  num_workers: 14
+  pin_memory: true
+  persistent_workers: true
+  rust_threads: 16
+  curriculum_stage: 2  # 中等复杂度预训练
+  keypoint_sigma: 2.0

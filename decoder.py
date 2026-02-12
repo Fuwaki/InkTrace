@@ -3,147 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from RepVit import Conv2d_BN
 from dense_heads import DenseHeads
-
-
-# =============================================================================
-# Building Blocks
-# =============================================================================
-
-
-class GatedCrossAttention(nn.Module):
-    """
-    带门控的残差交叉注意力模块 (Gated Cross Attention)
-
-    结构:
-        x = x + gate * MultiHeadAttention(Q=x, K=skip, V=skip)
-
-    特点:
-    1. 纯粹的 Cross Attention，逻辑简单，易于 debug
-    2. Zero-init Gate: 初始状态下完全等价于没有 skip connection
-    3. 广泛用于 Transformer Decoder 和 Diffusion Model 中
-    """
-
-    def __init__(self, dim_high, dim_skip, num_heads=4):
-        super().__init__()
-        self.num_heads = num_heads
-        self.dim_head = dim_high // num_heads
-        self.scale = self.dim_head**-0.5
-
-        # 维度对齐：将 skip 特征投影到 decoder 维度
-        self.skip_proj = nn.Conv2d(dim_skip, dim_high, 1, bias=False)
-        self.norm_skip = nn.GroupNorm(1, dim_high)
-
-        # Attention 投影
-        self.to_q = nn.Conv2d(dim_high, dim_high, 1, bias=False)
-        self.to_k = nn.Conv2d(dim_high, dim_high, 1, bias=False)
-        self.to_v = nn.Conv2d(dim_high, dim_high, 1, bias=False)
-        self.proj = nn.Conv2d(dim_high, dim_high, 1, bias=False)
-
-        # Norm for Query
-        self.norm_high = nn.GroupNorm(1, dim_high)
-
-        # 核心：零初始化门控
-        # 初始为 0，保证起步时完全切断 skip 信号
-        self.gate = nn.Parameter(torch.zeros(1))
-
-    def forward(self, high_feat, skip_feat=None):
-        """
-        Args:
-            high_feat: Decoder feature [B, C, H, W]
-            skip_feat: Encoder feature [B, C_skip, H, W], 可为 None
-        Returns:
-            Gated residual output [B, C, H, W]
-        """
-        # 无 skip 时直接返回主干
-        if skip_feat is None:
-            return high_feat
-
-        B, C, H, W = high_feat.shape
-        residual = high_feat
-
-        # 准备 Q (来自 Decoder)
-        high_norm = self.norm_high(high_feat)
-        q = self.to_q(high_norm).view(B, self.num_heads, self.dim_head, -1).permute(0, 1, 3, 2)
-
-        # 准备 K, V (来自 Encoder Skip)
-        skip_proj = self.skip_proj(skip_feat)
-        skip_proj = self.norm_skip(skip_proj)
-
-        k = self.to_k(skip_proj).view(B, self.num_heads, self.dim_head, -1)
-        v = self.to_v(skip_proj).view(B, self.num_heads, self.dim_head, -1).permute(0, 1, 3, 2)
-
-        # Attention 计算
-        attn = (q @ k) * self.scale
-        attn = attn.softmax(dim=-1)
-        out = attn @ v
-        out = out.permute(0, 1, 3, 2).reshape(B, C, H, W)
-
-        # Output Projection
-        out = self.proj(out)
-
-        # Gated Residual: residual + gate * out
-        return residual + self.gate * out
-
-class NeXtBlock(nn.Module):
-    """
-    ConvNeXt Style Block for Decoder.
-    特点: 7x7 Depthwise Conv + Inverted Bottleneck (1x1 Conv)
-    优势: 比普通 3x3 ResBlock 感受野更大，计算量更小，适合捕捉长笔画结构。
-    """
-
-    def __init__(self, in_channels, out_channels, expand_ratio=2, kernel_size=7):
-        super().__init__()
-        # Ensure input fits output dimension if needed for residual connection
-        self.shortcut = nn.Identity()
-        if in_channels != out_channels:
-            self.shortcut = Conv2d_BN(in_channels, out_channels, 1, 1, 0)
-
-        # 1. Depthwise Conv: Large Kernel (7x7), Spatial mixing
-        # We assume input has been projected to 'out_channels' dimension or we handle it inside.
-        # Here we follow a design where we match dimensions first if needed,
-        # but to keep it clean, let's process 'in_channels' -> 'out_channels' at the start if needed.
-
-        # However, standard ConvNeXt keeps dims constant.
-        # Let's do a preliminary projection if in != out, similar to the shortcut.
-        self.pre_proj = nn.Identity()
-        current_dim = in_channels
-        if in_channels != out_channels:
-            self.pre_proj = Conv2d_BN(in_channels, out_channels, 1, 1, 0)
-            current_dim = out_channels
-
-        # Now standard ConvNeXt block
-        self.dwconv = Conv2d_BN(
-            current_dim,
-            current_dim,
-            kernel_size,
-            stride=1,
-            pad=kernel_size // 2,
-            groups=current_dim,
-        )
-
-        hidden_dim = int(current_dim * expand_ratio)
-        self.pwconv1 = Conv2d_BN(current_dim, hidden_dim, 1, 1, 0)
-        self.act = nn.GELU()
-        self.pwconv2 = Conv2d_BN(hidden_dim, current_dim, 1, 1, 0)
-
-    def forward(self, x):
-        # Shortcut uses original input
-        res = self.shortcut(x)
-
-        # Main path
-        x = self.pre_proj(x)
-        x = self.dwconv(x)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.pwconv2(x)
-
-        return x + res
-
-
-# =============================================================================
-# Universal Decoder (Unified Architecture)
-# =============================================================================
-
+from modules import NeXtBlock, GatedCrossAttention
 
 class UniversalDecoder(nn.Module):
     """
@@ -170,7 +30,7 @@ class UniversalDecoder(nn.Module):
         """
         super().__init__()
         self.embed_dim = embed_dim
-
+        
         # 中间层通道数：默认与 embed_dim 相同，保持一致性
         if mid_channels is None:
             mid_channels = embed_dim

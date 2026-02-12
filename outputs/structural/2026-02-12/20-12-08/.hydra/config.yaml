@@ -1,0 +1,62 @@
+training:
+  lr: 0.001
+  batch_size: 256
+  epochs: 40
+  epoch_length: 40000
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  scheduler:
+    type: onecycle
+    warmup_epochs: 5
+    pct_start: 0.1
+  checkpoint:
+    save_dir: checkpoints/structural
+    keep_top_k: 3
+    save_last: true
+    monitor: train/loss
+    mode: min
+  loss_weights:
+    skeleton: 1.0
+    keypoints: 7.0
+    tangent: 1.0
+    width: 1.0
+    offset: 1.0
+  curriculum:
+    enabled: false
+    start_stage: 0
+    end_stage: 6
+    epochs_per_stage: 15
+  visualization:
+    enabled: true
+    num_samples: 8
+    log_interval: 2
+    log_metrics: true
+  init_from: null
+  resume: null
+data:
+  img_size: 64
+  batch_size: 256
+  num_workers: 14
+  pin_memory: true
+  persistent_workers: true
+  rust_threads: 16
+  curriculum_stage: 2
+  keypoint_sigma: 2.0
+logging:
+  log_interval: 20
+  tensorboard_dir: runs
+device:
+  accelerator: gpu
+  precision: bf16-mixed
+pipeline:
+  order:
+  - structural
+  - dense
+  auto_transfer: true
+print_config: false
+seed: 114514
+stage:
+  name: structural
+  description: 结构预训练：遮挡重建任务
+  init_from: null
+  freeze_encoder: false

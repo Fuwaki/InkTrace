@@ -1,0 +1,91 @@
+# =============================================================================
+# InkTrace V5 - Hydra 主配置
+# =============================================================================
+# 使用方法:
+#   python train_pl.py stage=structural
+#   python train_pl.py stage=dense
+#   python train_pl.py --multirun stage=structural,dense
+#
+# 覆盖配置示例:
+#   python train_pl.py stage=dense training.lr=5e-4 training.epochs=100
+#   python train_pl.py stage=structural model.embed_dim=128
+# =============================================================================
+
+defaults:
+  - training: default
+  - data: default
+  - logging: default
+  - device: default
+  - _self_
+  - optional override: null
+  # stage 放在 _self_ 之后，确保 stage 配置可以覆盖上面的 defaults
+  - stage: structural
+
+# =============================================================================
+# 流水线配置
+# =============================================================================
+pipeline:
+  # 训练顺序 (按列表顺序执行)
+  order:
+    - "structural"
+    - "dense"
+
+  # 自动权重传递
+  auto_transfer: true
+
+# =============================================================================
+# 运行时选项
+# =============================================================================
+print_config: false    # 打印完整配置
+seed: 114514           # 随机种子
+
+# =============================================================================
+# Hydra 运行时配置
+# =============================================================================
+hydra:
+  run:
+    dir: ./outputs/${stage.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ./multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra:job.num}
+  job:
+    config:
+      override_dirname:
+        exclude_keys:
+          - stage
+          - pipeline
+  help:
+    app_name: InkTrace Training
+    template: |
+      == ${hydra.help.app_name} ==
+
+      使用方法:
+        python train_pl.py stage=<stage_name> [overrides...]
+
+      可用阶段:
+        - structural: 结构预训练 (遮挡重建)
+        - dense:      密集预测训练 (多任务学习)
+        - finetune:   端到端微调
+        - debug:      快速调试配置
+
+      常用覆盖参数:
+        training.lr=<float>           学习率
+        training.epochs=<int>         训练轮数
+        training.batch_size=<int>     批次大小
+        data.num_workers=<int>        DataLoader workers
+
+      示例:
+        # 单阶段训练
+        python train_pl.py stage=structural
+
+        # 带覆盖参数
+        python train_pl.py stage=dense training.lr=5e-4 training.epochs=100
+
+        # 多阶段流水线
+        python train_pl.py --multirun stage=structural,dense
+
+        # 从 checkpoint 恢复
+        python train_pl.py stage=dense training.resume=checkpoints/structural/last.ckpt
+
+        # 迁移学习
+        python train_pl.py stage=dense training.init_from=checkpoints/structural/best.ckpt
