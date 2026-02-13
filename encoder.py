@@ -89,7 +89,7 @@ class StrokeEncoder(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
+            dim_feedforward=embed_dim * 4, 
             dropout=dropout,
             activation="gelu",
             batch_first=True,
