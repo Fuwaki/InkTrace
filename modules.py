@@ -70,7 +70,71 @@ class AddCoords(nn.Module):
         coords = self.cached_coords.expand(B, -1, -1, -1)
 
         return torch.cat([x, coords], dim=1)
+class SpatialModulation(nn.Module):
+    """
+    空间坐标调制：用 Fourier 坐标特征对卷积特征做逐通道仿射变换
 
+    y(h,w,c) = x(h,w,c) · (1 + γ(h,w,c)) + β(h,w,c)
+
+    关键特性：
+    1. 不增加主干通道数（γ,β 与输入同维）
+    2. 乘法注入，不会被 BN/LN 洗掉
+    3. 初始化为恒等映射（1+0=1），训练稳定
+    4. 可自由使用高频 Fourier 特征，不担心信号淹没
+    """
+
+    def __init__(self, channels, height, width, num_freqs=2, reduction=4):
+        super().__init__()
+        coord_dim = 2 + num_freqs * 4  # 线性xy + Fourier sin/cos
+        hidden = max(channels // reduction, 8)
+
+        # 坐标 → 调制参数的映射网络 (1×1 conv = per-pixel MLP)
+        self.modulation_net = nn.Sequential(
+            nn.Conv2d(coord_dim, hidden, 1, bias=True),
+            nn.GELU(),
+            nn.Conv2d(hidden, channels * 2, 1, bias=True),  # ×2: γ 和 β
+        )
+
+        # 关键：最后一层初始化为 0 → 初始时 γ=0, β=0 → y = x·(1+0)+0 = x
+        # 这保证模块初始时是恒等映射，训练从"无调制"开始，逐渐学习
+        nn.init.zeros_(self.modulation_net[-1].weight)
+        nn.init.zeros_(self.modulation_net[-1].bias)
+
+        # 预计算坐标特征（固定，不随输入变化）
+        self._build_coords(height, width, num_freqs)
+
+    def _build_coords(self, H, W, num_freqs):
+        yy = torch.linspace(-1, 1, H)
+        xx = torch.linspace(-1, 1, W)
+        gy, gx = torch.meshgrid(yy, xx, indexing="ij")
+
+        feats = [gx.unsqueeze(0), gy.unsqueeze(0)]
+        for i in range(num_freqs):
+            freq = (2.0**i) * math.pi
+            feats.extend(
+                [
+                    torch.sin(freq * gx).unsqueeze(0),
+                    torch.cos(freq * gx).unsqueeze(0),
+                    torch.sin(freq * gy).unsqueeze(0),
+                    torch.cos(freq * gy).unsqueeze(0),
+                ]
+            )
+
+        # [1, coord_dim, H, W] — 注册为 buffer，不参与梯度但跟随设备
+        self.register_buffer("coord_feats", torch.cat(feats).unsqueeze(0))
+
+    def forward(self, x):
+        B = x.shape[0]
+
+        # 坐标特征扩展到 batch 维度
+        coords = self.coord_feats.expand(B, -1, -1, -1)
+
+        # 生成调制参数
+        params = self.modulation_net(coords)  # [B, 2C, H, W]
+        gamma, beta = params.chunk(2, dim=1)  # 各 [B, C, H, W]
+
+        # 残差式调制（初始为恒等）
+        return x * (1.0 + gamma) + beta
 
 class GatedCrossAttention(nn.Module):
     """

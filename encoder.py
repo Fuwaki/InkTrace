@@ -1,86 +1,91 @@
 import torch
 import torch.nn as nn
 import math
-from timm.models.repvit import (
-    ConvNorm, RepViTBlock, RepVitDownsample
-)
-from timm.layers import SqueezeExcite
-from modules import AddCoords
+from timm.models.repvit import ConvNorm, RepViTBlock, RepVitDownsample
+from modules import AddCoords, SpatialModulation
 
 
 class StrokeEncoder(nn.Module):
-    """编码器：使用修改后的 RepViT 提取特征，Transformer 处理序列"""
+    """
+    坐标调制沙漏编码器（最终版）
+
+    信息流: 32768 -> 16384 -> 8192 -> 4096 -> 2048 -> 1024 (瓶颈)
+    返回：embeddings [B, num_tokens, embed_dim] 或者 ([f1,f2,f3,f4], embeddings)
+    """
 
     def __init__(
         self,
-        in_channels=1,  # 单通道灰度图
-        embed_dim=64,  # embedding 维度 (UNet 瓶颈: stem 128 -> bottleneck 64)
-        num_heads=4,  # Transformer 注意力头数 (64/4=16 per head)
-        num_layers=2,  # Transformer 层数 (64 tokens 不需要太深)
+        in_channels=1,
+        embed_dim=64,
+        num_heads=4,
+        num_layers=2,
         dropout=0.1,
     ):
         super().__init__()
 
-        # --- 修改点 1: 引入坐标生成器 ---
-        self.add_coords = AddCoords(height=64, width=64)  # 预计算 64x64 坐标
+        # ========== 输入坐标：仅线性 xy (2通道) ==========
+        self.add_coords = AddCoords(num_freqs=0, height=64, width=64)
+        input_ch = in_channels + 2  # 1 + 2 = 3
 
-        # --- 修改点 2: Stem 接收动态通道数 (1 Gray + added_coords) ---
-        # 这样网络第一层就能感知绝对几何位置
-        input_channels_with_coords = in_channels + self.add_coords.added_channels
-
-        # ========== Minimal Stem (使用 timm ConvNorm) ==========
-        # 仅做通道投影：3ch → 16ch，不降采样
+        # ========== Stem: 3→8, 保持 64×64 ==========
         self.stem = nn.Sequential(
-            ConvNorm(input_channels_with_coords, 16, 3, 1, 1),  # 3→16, 保持 64×64
+            ConvNorm(input_ch, 8, 3, 1, 1),
             nn.GELU(),
         )
 
-        # ========== Stage 1: 16→32, 64×64→32×32 ==========
-        self.stage1_downsample = RepVitDownsample(
-            16, 2, 32, 3, nn.GELU
+        # ========== Stage 1: 8→16, 64→32 ==========
+        self.stage1_downsample = RepVitDownsample(8, 2, 16, 3, nn.GELU)
+        self.stage1_blocks = nn.ModuleList(
+            [
+                RepViTBlock(16, 2, 3, use_se=False, act_layer=nn.GELU),
+            ]
         )
-        self.stage1_blocks = nn.ModuleList([
-            RepViTBlock(32, 2, 3, use_se=False, act_layer=nn.GELU),
-        ])
+        self.stage1_mod = SpatialModulation(16, 32, 32, num_freqs=2)
+        self.f1_channels = 16
 
-        # ========== Stage 2: 32→64, 32×32→16×16 ==========
-        self.stage2_downsample = RepVitDownsample(
-            32, 2, 64, 3, nn.GELU
+        # ========== Stage 2: 16→32, 32→16 ==========
+        self.stage2_downsample = RepVitDownsample(16, 2, 32, 3, nn.GELU)
+        self.stage2_blocks = nn.ModuleList(
+            [
+                RepViTBlock(32, 2, 3, use_se=True, act_layer=nn.GELU),
+            ]
         )
-        self.stage2_blocks = nn.ModuleList([
-            RepViTBlock(64, 2, 3, use_se=True, act_layer=nn.GELU),
-            RepViTBlock(64, 2, 3, use_se=False, act_layer=nn.GELU),
-        ])
+        self.stage2_mod = SpatialModulation(32, 16, 16, num_freqs=1)
+        self.f2_channels = 32
 
-        # ========== Stage 3: 64→128, 16×16→8×8 ==========
-        self.stage3_downsample = RepVitDownsample(
-            64, 2, 128, 3, nn.GELU
+        # ========== Stage 3: 32→64, 16→8 ==========
+        self.stage3_downsample = RepVitDownsample(32, 2, 64, 3, nn.GELU)
+        self.stage3_blocks = nn.ModuleList(
+            [
+                RepViTBlock(64, 2, 3, use_se=True, act_layer=nn.GELU),
+                RepViTBlock(64, 2, 3, use_se=False, act_layer=nn.GELU),
+            ]
         )
-        self.stage3_blocks = nn.ModuleList([
-            RepViTBlock(128, 2, 3, use_se=True, act_layer=nn.GELU),
-            RepViTBlock(128, 2, 3, use_se=False, act_layer=nn.GELU),
-        ])
+        self.stage3_mod = SpatialModulation(64, 8, 8, num_freqs=1)
+        self.f3_channels = 64
 
-        # 最终通道数和空间尺寸
-        self.feature_dim = 128  # Stage 3 输出
-        self.spatial_size = 8   # 8×8 特征图 = 64 tokens
+        # ========== Stage 4: 64→128, 8→4 (瓶颈前) ==========
+        self.stage4_downsample = RepVitDownsample(64, 2, 128, 3, nn.GELU)
+        self.stage4_blocks = nn.ModuleList(
+            [
+                RepViTBlock(128, 2, 3, use_se=True, act_layer=nn.GELU),
+            ]
+        )
+        self.stage4_mod = SpatialModulation(128, 4, 4, num_freqs=0)
 
-        # Skip 通道数（供 Decoder 读取）
-        self.f1_channels = 32   # Stage 1 输出
-        self.f2_channels = 64   # Stage 2 输出
+        # ========== Transformer 瓶颈 ==========
+        self.feature_dim = 128
+        self.spatial_size = 4
+        self.num_tokens = 16  # 4×4
 
-        # 4. 特征图 -> Token 序列
-        # 将 128x8x8 展平为 64x128 的 token 序列
         self.token_embed = nn.Sequential(
             nn.Linear(self.feature_dim, embed_dim),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
         )
 
-        # 5. 可学习位置编码 (使用 xavier_uniform 更稳定)
-        self.pos_embed = nn.Parameter(torch.zeros(1, 64, embed_dim))
-        nn.init.xavier_uniform_(self.pos_embed)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-        # 6. Transformer Encoder (增加层数以充分利用 token)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
@@ -91,81 +96,61 @@ class StrokeEncoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # 7. Layer Normalization
         self.norm = nn.LayerNorm(embed_dim)
-
-        # 8. Bottleneck Dropout (强制模型学习高级特征)
         self.bottleneck_dropout = nn.Dropout(0.15)
 
     def forward(self, x, return_interm_layers=False):
         """
         Args:
-            x: [B, 1, 64, 64] 输入图像
-            return_interm_layers: bool, 是否返回中间特征层 (F1, F2, F3)
+            x: [B, 1, 64, 64]
+            return_interm_layers: if True, return ([f1,f2,f3,f4], embeddings)
         Returns:
-            if return_interm_layers=False:
-                embeddings: [B, 64, embed_dim] embedding 序列 (F3_Enhanced flattened)
-            if return_interm_layers=True:
-                (features, embeddings)
-                features: [f1, f2, f3_enhanced] (spatially organized)
-                  - f1: [B, 32, 32, 32]
-                  - f2: [B, 64, 16, 16]
-                  - f3_enhanced: [B, embed_dim, 8, 8] (embed_dim 可配置, 例如 64)
-                embeddings: [B, 64, embed_dim] (same as default return)
+            embeddings: [B, 16, embed_dim]
         """
         B = x.shape[0]
 
-        # --- 1. 注入坐标信息 ---
-        # x 变成了 [B, 3, 64, 64]
-        x = self.add_coords(x)
+        # 输入 + 线性坐标
+        x = self.add_coords(x)  # [B, 3, 64, 64]
+        x = self.stem(x)  # [B, 8, 64, 64]
 
-        # --- 2. Minimal Stem: 通道投影 ---
-        x = self.stem(x)  # [B, 16, 64, 64]
-
-        # --- 3. Stage 1: 16→32, 64→32 (F1) ---
+        # Stage 1
         x = self.stage1_downsample(x)
         for block in self.stage1_blocks:
             x = block(x)
-        f1 = x  # [B, 32, 32, 32]
+        x = self.stage1_mod(x)
+        f1 = x  # [B, 16, 32, 32]
 
-        # --- 4. Stage 2: 32→64, 32→16 (F2) ---
+        # Stage 2
         x = self.stage2_downsample(x)
         for block in self.stage2_blocks:
             x = block(x)
-        f2 = x  # [B, 64, 16, 16]
+        x = self.stage2_mod(x)
+        f2 = x  # [B, 32, 16, 16]
 
-        # --- 5. Stage 3: 64→128, 16→8 ---
+        # Stage 3
         x = self.stage3_downsample(x)
         for block in self.stage3_blocks:
             x = block(x)
-        # x: [B, 128, 8, 8]
+        x = self.stage3_mod(x)
+        f3 = x  # [B, 64, 8, 8]
 
-        # --- 6. 展平为 token 序列 ---
-        x = x.flatten(2)  # [B, 128, 64]
-        x = x.transpose(1, 2)  # [B, 64, 128]
+        # Stage 4
+        x = self.stage4_downsample(x)
+        for block in self.stage4_blocks:
+            x = block(x)
+        x = self.stage4_mod(x)  # [B, 128, 4, 4]
 
-        # --- 7. Embedding 投影 ---
-        x = self.token_embed(x)  # [B, 64, embed_dim]
-
-        # --- 8. 可学习位置编码 ---
+        # Flatten → Transformer
+        x = x.flatten(2).transpose(1, 2)  # [B, 16, 128]
+        x = self.token_embed(x)  # [B, 16, embed_dim]
         x = x + self.pos_embed
-
-        # --- 9. Transformer 处理 ---
-        x_trans = self.transformer(x)  # [B, 64, embed_dim]
-
-        # --- 10. Layer Norm ---
-        embeddings = self.norm(x_trans)  # [B, 64, embed_dim]
-
-        # --- 11. Bottleneck Dropout ---
+        x = self.transformer(x)  # [B, 16, embed_dim]
+        embeddings = self.norm(x)
         embeddings = self.bottleneck_dropout(embeddings)
 
         if return_interm_layers:
-            # Reshape embeddings back to spatial [B, C, H, W] for F3
-            # embeddings: [B, 64, embed_dim] -> [B, embed_dim, 8, 8]
-            H = W = self.spatial_size  # 8
-            f3_enhanced = embeddings.transpose(1, 2).reshape(
-                B, -1, H, W
-            )  # [B, embed_dim, 8, 8]
-            return [f1, f2, f3_enhanced], embeddings
+            H = W = self.spatial_size  # 4
+            f4 = embeddings.transpose(1, 2).reshape(B, -1, H, W)
+            return [f1, f2, f3, f4], embeddings
 
         return embeddings
